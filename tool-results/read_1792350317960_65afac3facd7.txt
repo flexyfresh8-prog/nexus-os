@@ -1,0 +1,934 @@
+     1→"use client";
+     2→
+     3→// NEXUS OS — Files app: virtual file explorer (sidebar, navigation, DnD,
+     4→// clipboard, context menus, media preview, dialogs, keyboard shortcuts)
+     5→
+     6→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     7→import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from "react";
+     8→import {
+     9→  ArrowDown,
+    10→  ArrowUp,
+    11→  ChevronDown,
+    12→  ChevronLeft,
+    13→  ChevronRight,
+    14→  Clock,
+    15→  Download as DownloadIcon,
+    16→  FilePlus,
+    17→  FileText,
+    18→  FolderCode,
+    19→  FolderOpen,
+    20→  FolderPlus,
+    21→  HardDrive,
+    22→  House,
+    23→  Image as ImageIcon,
+    24→  LayoutGrid,
+    25→  List as ListIcon,
+    26→  Monitor,
+    27→  Music,
+    28→  RotateCw,
+    29→  Search,
+    30→  Upload,
+    31→} from "lucide-react";
+    32→import type { LucideIcon } from "lucide-react";
+    33→import type { AppInstanceProps, ContextMenuItem, FSNode } from "../../types";
+    34→import {
+    35→  HOME_ID,
+    36→  childrenOf,
+    37→  descendantsOf,
+    38→  displayPath,
+    39→  findChild,
+    40→  isTextFile,
+    41→  nodeSize,
+    42→  uniqueName,
+    43→} from "../../lib/vfs";
+    44→import { formatBytes, isTouchDevice } from "../../lib/utils";
+    45→import { useFS } from "../../store/fs";
+    46→import { useOS } from "../../store/os";
+    47→import { useSettings } from "../../store/settings";
+    48→import { TypeIcon, downloadNode } from "./itemIcon";
+    49→import { GridTile, IconBtn, ListRow } from "./items";
+    50→import type { ItemHandlers } from "./items";
+    51→import { ConfirmDialog, NameDialog, PropertiesDialog } from "./dialogs";
+    52→import { PreviewModal, isPreviewable } from "./preview";
+    53→
+    54→/* ---------------- clipboard (module-level, shared across windows) -------- */
+    55→
+    56→interface ClipboardData {
+    57→  ids: string[];
+    58→  mode: "copy" | "cut";
+    59→}
+    60→
+    61→let clipboard: ClipboardData | null = null;
+    62→const clipboardSubs = new Set<() => void>();
+    63→
+    64→function setClipboardData(next: ClipboardData | null) {
+    65→  clipboard = next;
+    66→  for (const fn of clipboardSubs) fn();
+    67→}
+    68→
+    69→function useClipboard(): ClipboardData | null {
+    70→  const [value, setValue] = useState<ClipboardData | null>(clipboard);
+    71→  useEffect(() => {
+    72→    const fn = () => setValue(clipboard);
+    73→    clipboardSubs.add(fn);
+    74→    return () => {
+    75→      clipboardSubs.delete(fn);
+    76→    };
+    77→  }, []);
+    78→  return value;
+    79→}
+    80→
+    81→/* ---------------- local types ------------------------------------------- */
+    82→
+    83→type SortKey = "name" | "modified" | "size";
+    84→type ViewMode = "grid" | "list";
+    85→
+    86→const SORT_LABELS: Record<SortKey, string> = { name: "Name", modified: "Modified", size: "Size" };
+    87→
+    88→const QUICK_LINKS: Array<{ name: string; icon: LucideIcon }> = [
+    89→  { name: "Home", icon: House },
+    90→  { name: "Documents", icon: FileText },
+    91→  { name: "Downloads", icon: DownloadIcon },
+    92→  { name: "Projects", icon: FolderCode },
+    93→  { name: "Pictures", icon: ImageIcon },
+    94→  { name: "Music", icon: Music },
+    95→  { name: "Desktop", icon: Monitor },
+    96→];
+    97→
+    98→type ModalState =
+    99→  | { kind: "preview"; id: string }
+   100→  | { kind: "rename"; id: string }
+   101→  | { kind: "newFolder" }
+   102→  | { kind: "newFile" }
+   103→  | { kind: "delete"; id: string }
+   104→  | { kind: "properties"; id: string };
+   105→
+   106→const NODE_MIME = "text/nexus-node";
+   107→
+   108→/* ---------------- component --------------------------------------------- */
+   109→
+   110→export default function FilesApp({ windowId, launchProps }: AppInstanceProps) {
+   111→  const nodes = useFS((s) => s.nodes);
+   112→  const ready = useFS((s) => s.ready);
+   113→  const recentIds = useSettings((s) => s.recentFiles);
+   114→  const addRecent = useSettings((s) => s.addRecent);
+   115→  const isFocused = useOS((s) => s.focusedId === windowId);
+   116→
+   117→  const [nav, setNav] = useState<{ stack: string[]; index: number }>({
+   118→    stack: [HOME_ID],
+   119→    index: 0,
+   120→  });
+   121→  const [selectedId, setSelectedId] = useState<string | null>(null);
+   122→  const [query, setQuery] = useState("");
+   123→  const [view, setView] = useState<ViewMode>("grid");
+   124→  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
+   125→  const [modal, setModal] = useState<ModalState | null>(null);
+   126→  const [dragOverId, setDragOverId] = useState<string | null>(null);
+   127→  const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
+   128→  const clipboardData = useClipboard();
+   129→
+   130→  const dirId = nav.stack[nav.index];
+   131→  const dirNode = ready ? nodes[dirId] : undefined;
+   132→
+   133→  const lastTapRef = useRef(0);
+   134→  const suppressDblRef = useRef(0);
+   135→  const draggingIdRef = useRef<string | null>(null);
+   136→  const bootstrappedRef = useRef(false);
+   137→  const fileInputRef = useRef<HTMLInputElement>(null);
+   138→
+   139→  /* ---------- navigation ---------- */
+   140→
+   141→  const navigate = useCallback((id: string) => {
+   142→    setNav((n) => {
+   143→      if (n.stack[n.index] === id) return n;
+   144→      const stack = [...n.stack.slice(0, n.index + 1), id].slice(-50);
+   145→      return { stack, index: stack.length - 1 };
+   146→    });
+   147→    setSelectedId(null);
+   148→  }, []);
+   149→
+   150→  const goBack = useCallback(() => {
+   151→    setNav((n) => (n.index > 0 ? { ...n, index: n.index - 1 } : n));
+   152→    setSelectedId(null);
+   153→  }, []);
+   154→
+   155→  const goForward = useCallback(() => {
+   156→    setNav((n) => (n.index < n.stack.length - 1 ? { ...n, index: n.index + 1 } : n));
+   157→    setSelectedId(null);
+   158→  }, []);
+   159→
+   160→  const goUp = useCallback(() => {
+   161→    const cur = useFS.getState().nodes[dirId];
+   162→    if (cur?.parentId) navigate(cur.parentId);
+   163→  }, [dirId, navigate]);
+   164→
+   165→  /* ---------- storage estimate ---------- */
+   166→
+   167→  const refreshStorage = useCallback(async () => {
+   168→    try {
+   169→      const est = await navigator.storage?.estimate?.();
+   170→      setStorage(est ? { usage: est.usage ?? 0, quota: est.quota ?? 0 } : null);
+   171→    } catch {
+   172→      setStorage(null);
+   173→    }
+   174→  }, []);
+   175→
+   176→  useEffect(() => {
+   177→    navigator.storage
+   178→      ?.estimate?.()
+   179→      .then((est) => setStorage(est ? { usage: est.usage ?? 0, quota: est.quota ?? 0 } : null))
+   180→      .catch(() => setStorage(null));
+   181→  }, []);
+   182→
+   183→  /* ---------- window title ---------- */
+   184→
+   185→  useEffect(() => {
+   186→    if (!ready) return;
+   187→    const title = `Files — ${displayPath(useFS.getState().nodes, dirId)}`;
+   188→    const st = useOS.getState();
+   189→    const win = st.windows.find((w) => w.id === windowId);
+   190→    if (win && win.title !== title) st.setTitle(windowId, title);
+   191→  }, [ready, dirId, windowId]);
+   192→
+   193→  /* ---------- launch props bootstrap (reveal / open a node) ---------- */
+   194→
+   195→  useEffect(() => {
+   196→    if (!ready || bootstrappedRef.current) return;
+   197→    bootstrappedRef.current = true;
+   198→    setTimeout(() => {
+   199→      const ns = useFS.getState().nodes;
+   200→      const candidates = [launchProps?.openId, launchProps?.openFileId, launchProps?.dirId];
+   201→      const target = candidates.find((v): v is string => typeof v === "string" && Boolean(ns[v]));
+   202→      if (!target) return;
+   203→      const node = ns[target];
+   204→      if (node.type === "dir") {
+   205→        navigate(node.id);
+   206→      } else if (node.parentId) {
+   207→        navigate(node.parentId);
+   208→        setSelectedId(target);
+   209→        if (isPreviewable(node)) setModal({ kind: "preview", id: target });
+   210→      }
+   211→    }, 0);
+   212→  }, [ready, launchProps, navigate]);
+   213→
+   214→  /* ---------- derived data ---------- */
+   215→
+   216→  const visibleItems = useMemo<FSNode[]>(() => {
+   217→    if (!ready) return [];
+   218→    const q = query.trim().toLowerCase();
+   219→    let list: FSNode[];
+   220→    if (q) {
+   221→      list = descendantsOf(nodes, dirId)
+   222→        .filter((id) => id !== dirId)
+   223→        .map((id) => nodes[id])
+   224→        .filter((n): n is FSNode => Boolean(n) && n.name.toLowerCase().includes(q));
+   225→    } else {
+   226→      list = childrenOf(nodes, dirId);
+   227→    }
+   228→    const dir = sort.asc ? 1 : -1;
+   229→    return [...list].sort((a, b) => {
+   230→      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+   231→      let c = 0;
+   232→      if (sort.key === "name") c = a.name.localeCompare(b.name, undefined, { numeric: true });
+   233→      else if (sort.key === "modified") c = a.modified - b.modified;
+   234→      else c = nodeSize(a) - nodeSize(b);
+   235→      return c * dir;
+   236→    });
+   237→  }, [nodes, dirId, query, sort, ready]);
+   238→
+   239→  const crumbs = useMemo(() => {
+   240→    const chain: FSNode[] = [];
+   241→    let cur: FSNode | undefined = nodes[dirId];
+   242→    let guard = 0;
+   243→    while (cur && guard++ < 64) {
+   244→      chain.unshift(cur);
+   245→      cur = cur.parentId !== null ? nodes[cur.parentId] : undefined;
+   246→    }
+   247→    return chain;
+   248→  }, [nodes, dirId]);
+   249→
+   250→  const recentNodes = useMemo(
+   251→    () =>
+   252→      recentIds
+   253→        .map((id) => nodes[id])
+   254→        .filter((n): n is FSNode => Boolean(n))
+   255→        .slice(0, 8),
+   256→    [recentIds, nodes]
+   257→  );
+   258→
+   259→  const modalNode = modal && "id" in modal ? nodes[modal.id] : undefined;
+   260→
+   261→  /* ---------- actions ---------- */
+   262→
+   263→  const openNode = useCallback(
+   264→    (node: FSNode) => {
+   265→      if (node.type === "dir") {
+   266→        navigate(node.id);
+   267→        return;
+   268→      }
+   269→      if (isPreviewable(node)) {
+   270→        setModal({ kind: "preview", id: node.id });
+   271→        return;
+   272→      }
+   273→      if (isTextFile(node.name, node.mime)) {
+   274→        addRecent(node.id);
+   275→        useOS.getState().launch("studio", { openFileId: node.id });
+   276→        return;
+   277→      }
+   278→      setModal({ kind: "properties", id: node.id });
+   279→    },
+   280→    [navigate, addRecent]
+   281→  );
+   282→
+   283→  const pasteIntoDir = useCallback(() => {
+   284→    if (!clipboard) return;
+   285→    const fs = useFS.getState();
+   286→    const os = useOS.getState();
+   287→    for (const id of clipboard.ids) {
+   288→      const err = clipboard.mode === "copy" ? fs.copy(id, dirId) : fs.move(id, dirId);
+   289→      if (err) os.notify({ title: "Files", body: err });
+   290→    }
+   291→    if (clipboard.mode === "cut") setClipboardData(null);
+   292→  }, [dirId]);
+   293→
+   294→  const importFiles = useCallback(async (files: File[], parentId: string) => {
+   295→    const fs = useFS.getState();
+   296→    const os = useOS.getState();
+   297→    for (const file of files) {
+   298→      try {
+   299→        if (isTextFile(file.name, file.type)) {
+   300→          const content = await file.text();
+   301→          const res = fs.createNode({ parentId, name: file.name, type: "file", content, autoRename: true });
+   302→          if ("error" in res) os.notify({ title: "Files", body: res.error });
+   303→        } else {
+   304→          const binary = await file.arrayBuffer();
+   305→          const res = fs.createNode({
+   306→            parentId,
+   307→            name: file.name,
+   308→            type: "file",
+   309→            binary,
+   310→            mime: file.type || undefined,
+   311→            autoRename: true,
+   312→          });
+   313→          if ("error" in res) os.notify({ title: "Files", body: res.error });
+   314→        }
+   315→      } catch (err) {
+   316→        os.notify({
+   317→          title: "Files",
+   318→          body: `Could not import "${file.name}" — ${err instanceof Error ? err.message : "unknown error"}`,
+   319→        });
+   320→      }
+   321→    }
+   322→  }, []);
+   323→
+   324→  const sortMenuItems = useCallback((): ContextMenuItem[] => {
+   325→    const mark = (active: boolean) => (active ? "✓  " : "");
+   326→    return [
+   327→      { label: mark(sort.key === "name") + "Name", onClick: () => setSort((s) => ({ ...s, key: "name" })) },
+   328→      {
+   329→        label: mark(sort.key === "modified") + "Modified",
+   330→        onClick: () => setSort((s) => ({ ...s, key: "modified" })),
+   331→      },
+   332→      { label: mark(sort.key === "size") + "Size", onClick: () => setSort((s) => ({ ...s, key: "size" })) },
+   333→      { separator: true },
+   334→      { label: mark(sort.asc) + "Ascending", onClick: () => setSort((s) => ({ ...s, asc: true })) },
+   335→      { label: mark(!sort.asc) + "Descending", onClick: () => setSort((s) => ({ ...s, asc: false })) },
+   336→    ];
+   337→  }, [sort]);
+   338→
+   339→  const openSortMenu = useCallback(
+   340→    (x: number, y: number) => {
+   341→      useOS.getState().openCtx(x, y, sortMenuItems());
+   342→    },
+   343→    [sortMenuItems]
+   344→  );
+   345→
+   346→  const openItemMenu = useCallback(
+   347→    (node: FSNode, x: number, y: number) => {
+   348→      setSelectedId(node.id);
+   349→      const os = useOS.getState();
+   350→      const items: ContextMenuItem[] = [{ label: "Open", onClick: () => openNode(node) }];
+   351→      if (isPreviewable(node)) {
+   352→        items.push({ label: "Preview", onClick: () => setModal({ kind: "preview", id: node.id }) });
+   353→      }
+   354→      if (node.type === "file" && isTextFile(node.name, node.mime)) {
+   355→        items.push({
+   356→          label: "Open in Studio",
+   357→          onClick: () => {
+   358→            addRecent(node.id);
+   359→            os.launch("studio", { openFileId: node.id });
+   360→          },
+   361→        });
+   362→      }
+   363→      if (node.type === "file") {
+   364→        items.push({ label: "Download", onClick: () => downloadNode(node) });
+   365→      }
+   366→      items.push(
+   367→        { separator: true },
+   368→        {
+   369→          label: "Duplicate",
+   370→          onClick: () => {
+   371→            const err = useFS.getState().copy(node.id, node.parentId ?? dirId);
+   372→            if (err) os.notify({ title: "Files", body: err });
+   373→          },
+   374→        },
+   375→        { label: "Rename", shortcut: "F2", onClick: () => setModal({ kind: "rename", id: node.id }) },
+   376→        { separator: true },
+   377→        {
+   378→          label: "Copy",
+   379→          shortcut: "Ctrl+C",
+   380→          onClick: () => setClipboardData({ ids: [node.id], mode: "copy" }),
+   381→        },
+   382→        {
+   383→          label: "Cut",
+   384→          shortcut: "Ctrl+X",
+   385→          onClick: () => setClipboardData({ ids: [node.id], mode: "cut" }),
+   386→        },
+   387→        { separator: true },
+   388→        {
+   389→          label: "Delete",
+   390→          shortcut: "Del",
+   391→          danger: true,
+   392→          onClick: () => setModal({ kind: "delete", id: node.id }),
+   393→        },
+   394→        { label: "Properties", onClick: () => setModal({ kind: "properties", id: node.id }) }
+   395→      );
+   396→      os.openCtx(x, y, items);
+   397→    },
+   398→    [dirId, openNode, addRecent]
+   399→  );
+   400→
+   401→  const openBackgroundMenu = useCallback(
+   402→    (x: number, y: number) => {
+   403→      const items: ContextMenuItem[] = [
+   404→        { label: "New Folder", onClick: () => setModal({ kind: "newFolder" }) },
+   405→        { label: "New Text File", onClick: () => setModal({ kind: "newFile" }) },
+   406→        { label: "Paste", disabled: !clipboard, onClick: pasteIntoDir },
+   407→        { separator: true },
+   408→        { label: "Sort by…", onClick: () => openSortMenu(x + 8, y + 8) },
+   409→        {
+   410→          label: "Refresh",
+   411→          onClick: () => {
+   412→            setQuery("");
+   413→            void refreshStorage();
+   414→          },
+   415→        },
+   416→        { separator: true },
+   417→        { label: "Folder Properties", onClick: () => setModal({ kind: "properties", id: dirId }) },
+   418→      ];
+   419→      useOS.getState().openCtx(x, y, items);
+   420→    },
+   421→    [pasteIntoDir, openSortMenu, refreshStorage, dirId]
+   422→  );
+   423→
+   424→  /* ---------- item interaction (click / touch / dnd) ---------- */
+   425→
+   426→  const handleItemTap = useCallback(
+   427→    (node: FSNode, e: ReactMouseEvent) => {
+   428→      e.stopPropagation();
+   429→      const ptr = e.nativeEvent as PointerEvent;
+   430→      const isTouch = ptr.pointerType === "touch" || isTouchDevice();
+   431→      if (!isTouch) {
+   432→        setSelectedId(node.id);
+   433→        return;
+   434→      }
+   435→      const now = Date.now();
+   436→      if (selectedId === node.id && now - lastTapRef.current < 500) {
+   437→        lastTapRef.current = 0;
+   438→        suppressDblRef.current = now + 600;
+   439→        openNode(node);
+   440→      } else {
+   441→        lastTapRef.current = now;
+   442→        setSelectedId(node.id);
+   443→      }
+   444→    },
+   445→    [selectedId, openNode]
+   446→  );
+   447→
+   448→  const handleItemOpen = useCallback(
+   449→    (node: FSNode, e: ReactMouseEvent) => {
+   450→      e.stopPropagation();
+   451→      if (Date.now() < suppressDblRef.current) return;
+   452→      openNode(node);
+   453→    },
+   454→    [openNode]
+   455→  );
+   456→
+   457→  const itemHandlers: ItemHandlers = {
+   458→    onTap: handleItemTap,
+   459→    onOpen: handleItemOpen,
+   460→    onMenu: openItemMenu,
+   461→    onDragStart: (node, e) => {
+   462→      draggingIdRef.current = node.id;
+   463→      e.dataTransfer.setData(NODE_MIME, node.id);
+   464→      e.dataTransfer.effectAllowed = "move";
+   465→    },
+   466→    onDragOver: (node, e) => {
+   467→      if (draggingIdRef.current === node.id) return;
+   468→      e.preventDefault();
+   469→      e.stopPropagation();
+   470→      e.dataTransfer.dropEffect = "move";
+   471→      setDragOverId((cur) => (cur === node.id ? cur : node.id));
+   472→    },
+   473→    onDragLeave: (node) => {
+   474→      setDragOverId((cur) => (cur === node.id ? null : cur));
+   475→    },
+   476→    onDrop: (node, e) => {
+   477→      e.preventDefault();
+   478→      e.stopPropagation();
+   479→      draggingIdRef.current = null;
+   480→      setDragOverId(null);
+   481→      if (e.dataTransfer.files.length > 0) {
+   482→        void importFiles(Array.from(e.dataTransfer.files), node.id);
+   483→        return;
+   484→      }
+   485→      const dragged = e.dataTransfer.getData(NODE_MIME);
+   486→      if (dragged && dragged !== node.id) {
+   487→        const err = useFS.getState().move(dragged, node.id);
+   488→        if (err) useOS.getState().notify({ title: "Files", body: err });
+   489→      }
+   490→    },
+   491→    onDragEnd: () => {
+   492→      draggingIdRef.current = null;
+   493→      setDragOverId(null);
+   494→    },
+   495→  };
+   496→
+   497→  const handleContentDrop = useCallback(
+   498→    (e: ReactDragEvent) => {
+   499→      e.preventDefault();
+   500→      draggingIdRef.current = null;
+   501→      setDragOverId(null);
+   502→      if (e.dataTransfer.files.length > 0) {
+   503→        void importFiles(Array.from(e.dataTransfer.files), dirId);
+   504→        return;
+   505→      }
+   506→      const dragged = e.dataTransfer.getData(NODE_MIME);
+   507→      if (dragged && dragged !== dirId) {
+   508→        const err = useFS.getState().move(dragged, dirId);
+   509→        if (err) useOS.getState().notify({ title: "Files", body: err });
+   510→      }
+   511→    },
+   512→    [dirId, importFiles]
+   513→  );
+   514→
+   515→  /* ---------- keyboard ---------- */
+   516→
+   517→  useEffect(() => {
+   518→    const onKey = (e: KeyboardEvent) => {
+   519→      const el = document.activeElement as HTMLElement | null;
+   520→      const tag = el?.tagName ?? "";
+   521→      const typing =
+   522→        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el?.isContentEditable ?? false);
+   523→      if (e.key === "Escape") {
+   524→        if (modal) {
+   525→          setModal(null);
+   526→          return;
+   527→        }
+   528→        if (!typing) setSelectedId(null);
+   529→        return;
+   530→      }
+   531→      if (modal || typing || tag === "BUTTON" || !isFocused || e.metaKey || e.ctrlKey || e.altKey) {
+   532→        return;
+   533→      }
+   534→      const node = selectedId ? nodes[selectedId] : undefined;
+   535→      if (!node) return;
+   536→      if (e.key === "Delete") {
+   537→        e.preventDefault();
+   538→        setModal({ kind: "delete", id: node.id });
+   539→      } else if (e.key === "F2") {
+   540→        e.preventDefault();
+   541→        setModal({ kind: "rename", id: node.id });
+   542→      } else if (e.key === "Enter") {
+   543→        e.preventDefault();
+   544→        openNode(node);
+   545→      }
+   546→    };
+   547→    window.addEventListener("keydown", onKey);
+   548→    return () => window.removeEventListener("keydown", onKey);
+   549→  }, [modal, isFocused, selectedId, nodes, openNode]);
+   550→
+   551→  /* ---------- render ---------- */
+   552→
+   553→  const searchQ = query.trim();
+   554→  const storagePct =
+   555→    storage && storage.quota > 0 ? Math.min(100, Math.round((storage.usage / storage.quota) * 100)) : 0;
+   556→
+   557→  return (
+   558→    <div className="@container flex h-full min-h-0 w-full text-[13px] text-[var(--nx-text)]">
+   559→      {/* sidebar */}
+   560→      <aside className="nx-scroll @min-[640px]:flex hidden w-[200px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-[var(--nx-border)] p-2">
+   561→        <div>
+   562→          <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--nx-text-dim)]">
+   563→            Quick access
+   564→          </div>
+   565→          {QUICK_LINKS.map((q) => {
+   566→            const id = q.name === "Home" ? HOME_ID : findChild(nodes, HOME_ID, q.name)?.id;
+   567→            if (!id) return null;
+   568→            const active = id === dirId;
+   569→            return (
+   570→              <button
+   571→                key={q.name}
+   572→                type="button"
+   573→                onClick={() => navigate(id)}
+   574→                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] transition ${
+   575→                  active
+   576→                    ? "bg-[rgba(var(--nx-accent-rgb),0.15)] text-[var(--nx-text)]"
+   577→                    : "text-[var(--nx-text-dim)] hover:bg-white/[0.06] hover:text-[var(--nx-text)]"
+   578→                }`}
+   579→              >
+   580→                <q.icon size={14} className={active ? "text-[var(--nx-accent)]" : ""} />
+   581→                {q.name}
+   582→              </button>
+   583→            );
+   584→          })}
+   585→        </div>
+   586→
+   587→        <div>
+   588→          <div className="flex items-center gap-1.5 px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--nx-text-dim)]">
+   589→            <Clock size={11} />
+   590→            Recent
+   591→          </div>
+   592→          {recentNodes.length === 0 ? (
+   593→            <div className="px-2 py-1 text-[11px] text-[var(--nx-text-dim)] opacity-70">
+   594→              No recent files
+   595→            </div>
+   596→          ) : (
+   597→            recentNodes.map((n) => (
+   598→              <button
+   599→                key={n.id}
+   600→                type="button"
+   601→                onClick={() => openNode(n)}
+   602→                title={displayPath(nodes, n.id)}
+   603→                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] text-[var(--nx-text-dim)] transition hover:bg-white/[0.06] hover:text-[var(--nx-text)]"
+   604→              >
+   605→                <TypeIcon node={n} size={14} />
+   606→                <span className="min-w-0 flex-1 truncate text-left">{n.name}</span>
+   607→              </button>
+   608→            ))
+   609→          )}
+   610→        </div>
+   611→
+   612→        <div className="mt-auto rounded-xl border border-[var(--nx-border)] bg-white/[0.03] p-2.5">
+   613→          <div className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--nx-text-dim)]">
+   614→            <HardDrive size={12} />
+   615→            Storage
+   616→            <button
+   617→              type="button"
+   618→              title="Refresh storage info"
+   619→              aria-label="Refresh storage info"
+   620→              onClick={() => void refreshStorage()}
+   621→              className="ml-auto grid h-5 w-5 place-items-center rounded transition hover:bg-white/10 hover:text-[var(--nx-text)]"
+   622→            >
+   623→              <RotateCw size={10} />
+   624→            </button>
+   625→          </div>
+   626→          {storage ? (
+   627→            <>
+   628→              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+   629→                <div
+   630→                  className="h-full rounded-full bg-[var(--nx-accent)] transition-[width]"
+   631→                  style={{ width: `${storagePct}%` }}
+   632→                />
+   633→              </div>
+   634→              <div className="mt-1.5 text-[10px] text-[var(--nx-text-dim)]">
+   635→                {formatBytes(storage.usage)} of {formatBytes(storage.quota)} used
+   636→              </div>
+   637→            </>
+   638→          ) : (
+   639→            <div className="mt-2 text-[10px] text-[var(--nx-text-dim)]">Storage info unavailable</div>
+   640→          )}
+   641→        </div>
+   642→      </aside>
+   643→
+   644→      {/* main column */}
+   645→      <div className="flex min-w-0 flex-1 flex-col">
+   646→        {/* toolbar */}
+   647→        <div className="flex h-11 shrink-0 items-center gap-0.5 border-b border-[var(--nx-border)] px-2">
+   648→          <IconBtn title="Back" disabled={nav.index <= 0} onClick={goBack}>
+   649→            <ChevronLeft size={15} />
+   650→          </IconBtn>
+   651→          <IconBtn title="Forward" disabled={nav.index >= nav.stack.length - 1} onClick={goForward}>
+   652→            <ChevronRight size={15} />
+   653→          </IconBtn>
+   654→          <IconBtn title="Up one level" disabled={!dirNode?.parentId} onClick={goUp}>
+   655→            <ArrowUp size={15} />
+   656→          </IconBtn>
+   657→
+   658→          <nav
+   659→            aria-label="Breadcrumb"
+   660→            className="nx-scroll mx-1 flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto whitespace-nowrap py-1"
+   661→          >
+   662→            {crumbs.map((c, i) => {
+   663→              const last = i === crumbs.length - 1;
+   664→              return (
+   665→                <div key={c.id} className="flex shrink-0 items-center gap-0.5">
+   666→                  {i > 0 && (
+   667→                    <ChevronRight size={11} className="shrink-0 text-[var(--nx-text-dim)] opacity-60" />
+   668→                  )}
+   669→                  <button
+   670→                    type="button"
+   671→                    onClick={() => !last && navigate(c.id)}
+   672→                    className={`max-w-[160px] truncate rounded px-1.5 py-0.5 text-[12px] transition ${
+   673→                      last
+   674→                        ? "font-medium text-[var(--nx-text)]"
+   675→                        : "text-[var(--nx-text-dim)] hover:bg-white/10 hover:text-[var(--nx-text)]"
+   676→                    }`}
+   677→                  >
+   678→                    {c.id === HOME_ID ? "~" : c.name || "/"}
+   679→                  </button>
+   680→                </div>
+   681→              );
+   682→            })}
+   683→          </nav>
+   684→
+   685→          <div className="mx-1 h-4 w-px shrink-0 bg-[var(--nx-border)]" />
+   686→
+   687→          <div className="relative shrink-0">
+   688→            <Search
+   689→              size={12}
+   690→              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--nx-text-dim)]"
+   691→            />
+   692→            <input
+   693→              value={query}
+   694→              onChange={(e) => setQuery(e.target.value)}
+   695→              placeholder="Search"
+   696→              aria-label="Search current folder"
+   697→              spellCheck={false}
+   698→              className="h-7 w-28 rounded-lg border border-[var(--nx-border)] bg-white/[0.04] pl-7 pr-2 text-[12px] text-[var(--nx-text)] outline-none transition-[width] placeholder:text-[var(--nx-text-dim)] focus:w-36 focus:border-[rgba(var(--nx-accent-rgb),0.5)]"
+   699→            />
+   700→          </div>
+   701→
+   702→          <div className="mx-1 h-4 w-px shrink-0 bg-[var(--nx-border)]" />
+   703→
+   704→          <button
+   705→            type="button"
+   706→            title="Sort"
+   707→            onClick={(e) => {
+   708→              const r = e.currentTarget.getBoundingClientRect();
+   709→              openSortMenu(r.left, r.bottom + 4);
+   710→            }}
+   711→            className="flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[11px] text-[var(--nx-text-dim)] transition hover:bg-white/10 hover:text-[var(--nx-text)]"
+   712→          >
+   713→            {SORT_LABELS[sort.key]}
+   714→            <ChevronDown size={12} />
+   715→          </button>
+   716→          <IconBtn
+   717→            title={sort.asc ? "Ascending order" : "Descending order"}
+   718→            onClick={() => setSort((s) => ({ ...s, asc: !s.asc }))}
+   719→          >
+   720→            {sort.asc ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+   721→          </IconBtn>
+   722→
+   723→          <div className="mx-1 h-4 w-px shrink-0 bg-[var(--nx-border)]" />
+   724→
+   725→          <IconBtn title="Grid view" active={view === "grid"} onClick={() => setView("grid")}>
+   726→            <LayoutGrid size={14} />
+   727→          </IconBtn>
+   728→          <IconBtn title="List view" active={view === "list"} onClick={() => setView("list")}>
+   729→            <ListIcon size={14} />
+   730→          </IconBtn>
+   731→
+   732→          <div className="mx-1 h-4 w-px shrink-0 bg-[var(--nx-border)]" />
+   733→
+   734→          <IconBtn title="New folder" onClick={() => setModal({ kind: "newFolder" })}>
+   735→            <FolderPlus size={14} />
+   736→          </IconBtn>
+   737→          <IconBtn title="New text file" onClick={() => setModal({ kind: "newFile" })}>
+   738→            <FilePlus size={14} />
+   739→          </IconBtn>
+   740→          <IconBtn title="Upload files" onClick={() => fileInputRef.current?.click()}>
+   741→            <Upload size={14} />
+   742→          </IconBtn>
+   743→          <input
+   744→            ref={fileInputRef}
+   745→            type="file"
+   746→            multiple
+   747→            className="hidden"
+   748→            onChange={(e) => {
+   749→              const files = Array.from(e.target.files ?? []);
+   750→              e.target.value = "";
+   751→              if (files.length > 0) void importFiles(files, dirId);
+   752→            }}
+   753→          />
+   754→        </div>
+   755→
+   756→        {/* content */}
+   757→        <div
+   758→          className="nx-scroll relative min-h-0 flex-1 overflow-y-auto"
+   759→          onDragOver={(e) => e.preventDefault()}
+   760→          onDrop={handleContentDrop}
+   761→          onClick={() => setSelectedId(null)}
+   762→          onContextMenu={(e) => {
+   763→            e.preventDefault();
+   764→            openBackgroundMenu(e.clientX, e.clientY);
+   765→          }}
+   766→        >
+   767→          {!ready ? (
+   768→            <div className="grid grid-cols-[repeat(auto-fill,92px)] content-start gap-1.5 p-3">
+   769→              {Array.from({ length: 12 }, (_, i) => (
+   770→                <div key={i} className="flex h-[96px] w-[92px] flex-col items-center gap-2 rounded-xl p-2">
+   771→                  <div className="h-10 w-10 animate-pulse rounded-lg bg-white/[0.06]" />
+   772→                  <div className="h-2 w-14 animate-pulse rounded bg-white/[0.06]" />
+   773→                </div>
+   774→              ))}
+   775→            </div>
+   776→          ) : !nodes[dirId] ? (
+   777→            <div className="grid min-h-full place-items-center p-6">
+   778→              <div className="flex flex-col items-center gap-3 text-center">
+   779→                <FolderOpen size={44} strokeWidth={1.4} className="text-[var(--nx-text-dim)] opacity-70" />
+   780→                <div className="text-[13px]">Location not found</div>
+   781→                <button
+   782→                  type="button"
+   783→                  onClick={() => navigate(HOME_ID)}
+   784→                  className="rounded-lg border border-[rgba(var(--nx-accent-rgb),0.4)] bg-[rgba(var(--nx-accent-rgb),0.12)] px-3 py-1.5 text-[12px] text-[var(--nx-accent)] transition hover:bg-[rgba(var(--nx-accent-rgb),0.2)]"
+   785→                >
+   786→                  Go to Home
+   787→                </button>
+   788→              </div>
+   789→            </div>
+   790→          ) : (
+   791→            <>
+   792→              {searchQ && (
+   793→                <div className="flex items-center gap-2 border-b border-[var(--nx-border)] px-3 py-1.5 text-[11px] text-[var(--nx-text-dim)]">
+   794→                  <Search size={11} />
+   795→                  <span>
+   796→                    {visibleItems.length} result{visibleItems.length === 1 ? "" : "s"} for &quot;
+   797→                    {searchQ}&quot;
+   798→                  </span>
+   799→                  <button
+   800→                    type="button"
+   801→                    onClick={() => setQuery("")}
+   802→                    className="ml-auto rounded px-1.5 py-0.5 transition hover:bg-white/10 hover:text-[var(--nx-text)]"
+   803→                  >
+   804→                    Clear
+   805→                  </button>
+   806→                </div>
+   807→              )}
+   808→
+   809→              {visibleItems.length === 0 ? (
+   810→                searchQ ? (
+   811→                  <div className="grid min-h-full place-items-center p-6">
+   812→                    <div className="flex flex-col items-center gap-2 text-center">
+   813→                      <Search size={36} strokeWidth={1.4} className="text-[var(--nx-text-dim)] opacity-70" />
+   814→                      <div className="text-[13px]">No matches for &quot;{searchQ}&quot;</div>
+   815→                      <div className="text-[12px] text-[var(--nx-text-dim)]">
+   816→                        Try a different search term
+   817→                      </div>
+   818→                    </div>
+   819→                  </div>
+   820→                ) : (
+   821→                  <div className="grid min-h-full place-items-center p-6">
+   822→                    <div className="flex flex-col items-center gap-2 text-center">
+   823→                      <FolderOpen
+   824→                        size={44}
+   825→                        strokeWidth={1.4}
+   826→                        className="text-[var(--nx-text-dim)] opacity-70"
+   827→                      />
+   828→                      <div className="text-[13px]">This folder is empty</div>
+   829→                      <div className="text-[12px] text-[var(--nx-text-dim)]">
+   830→                        Create something with the buttons above
+   831→                      </div>
+   832→                    </div>
+   833→                  </div>
+   834→                )
+   835→              ) : view === "grid" ? (
+   836→                <div className="grid grid-cols-[repeat(auto-fill,92px)] content-start gap-1.5 p-3">
+   837→                  {visibleItems.map((node) => (
+   838→                    <GridTile
+   839→                      key={node.id}
+   840→                      node={node}
+   841→                      selected={selectedId === node.id}
+   842→                      dropTarget={dragOverId === node.id}
+   843→                      handlers={itemHandlers}
+   844→                    />
+   845→                  ))}
+   846→                </div>
+   847→              ) : (
+   848→                <div className="p-2">
+   849→                  <div className="flex items-center gap-2 border-b border-[var(--nx-border)] px-2 pb-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--nx-text-dim)]">
+   850→                    <span className="min-w-0 flex-1">Name</span>
+   851→                    <span className="w-16 shrink-0 text-right">Size</span>
+   852→                    <span className="hidden w-32 shrink-0 @min-[560px]:block">Modified</span>
+   853→                    <span className="hidden w-24 shrink-0 @min-[640px]:block">Kind</span>
+   854→                  </div>
+   855→                  <div className="pt-1">
+   856→                    {visibleItems.map((node) => (
+   857→                      <ListRow
+   858→                        key={node.id}
+   859→                        node={node}
+   860→                        selected={selectedId === node.id}
+   861→                        dropTarget={dragOverId === node.id}
+   862→                        handlers={itemHandlers}
+   863→                      />
+   864→                    ))}
+   865→                  </div>
+   866→                </div>
+   867→              )}
+   868→            </>
+   869→          )}
+   870→        </div>
+   871→      </div>
+   872→
+   873→      {/* modals */}
+   874→      {modal?.kind === "preview" && modalNode && (
+   875→        <PreviewModal node={modalNode} onClose={() => setModal(null)} />
+   876→      )}
+   877→      {modal?.kind === "rename" && modalNode && (
+   878→        <NameDialog
+   879→          title="Rename"
+   880→          initial={modalNode.name}
+   881→          confirmLabel="Rename"
+   882→          onClose={() => setModal(null)}
+   883→          onConfirm={(name) => useFS.getState().rename(modal.id, name)}
+   884→        />
+   885→      )}
+   886→      {modal?.kind === "newFolder" && (
+   887→        <NameDialog
+   888→          title="New Folder"
+   889→          initial={uniqueName(nodes, dirId, "New Folder")}
+   890→          confirmLabel="Create"
+   891→          onClose={() => setModal(null)}
+   892→          onConfirm={(name) => {
+   893→            const res = useFS.getState().createNode({ parentId: dirId, name, type: "dir" });
+   894→            if ("id" in res) setSelectedId(res.id);
+   895→            return "error" in res ? res.error : null;
+   896→          }}
+   897→        />
+   898→      )}
+   899→      {modal?.kind === "newFile" && (
+   900→        <NameDialog
+   901→          title="New Text File"
+   902→          initial={uniqueName(nodes, dirId, "New Text File.txt")}
+   903→          confirmLabel="Create"
+   904→          onClose={() => setModal(null)}
+   905→          onConfirm={(name) => {
+   906→            const res = useFS.getState().createNode({ parentId: dirId, name, type: "file", content: "" });
+   907→            if ("id" in res) setSelectedId(res.id);
+   908→            return "error" in res ? res.error : null;
+   909→          }}
+   910→        />
+   911→      )}
+   912→      {modal?.kind === "delete" && modalNode && (
+   913→        <ConfirmDialog
+   914→          title={`Delete "${modalNode.name}"?`}
+   915→          body="This cannot be undone."
+   916→          confirmLabel="Delete"
+   917→          onClose={() => setModal(null)}
+   918→          onConfirm={() => {
+   919→            const err = useFS.getState().remove(modal.id);
+   920→            if (!err) {
+   921→              if (selectedId === modal.id) setSelectedId(null);
+   922→              if (!useFS.getState().nodes[dirId]) navigate(HOME_ID);
+   923→            }
+   924→            return err;
+   925→          }}
+   926→        />
+   927→      )}
+   928→      {modal?.kind === "properties" && modalNode && (
+   929→        <PropertiesDialog node={modalNode} nodes={nodes} onClose={() => setModal(null)} />
+   930→      )}
+   931→    </div>
+   932→  );
+   933→}
+   934→
