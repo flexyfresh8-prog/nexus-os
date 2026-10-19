@@ -360,6 +360,16 @@ export default function FilesApp({ windowId, launchProps }: AppInstanceProps) {
           },
         });
       }
+      if (node.type === "dir") {
+        items.push({
+          label: "Open in Terminal",
+          onClick: () => os.launch("terminal", { cwdId: node.id }),
+        });
+        items.push({
+          label: "Open as Project in Studio",
+          onClick: () => os.launch("studio", { projectId: node.id }),
+        });
+      }
       if (node.type === "file") {
         items.push({ label: "Download", onClick: () => downloadNode(node) });
       }

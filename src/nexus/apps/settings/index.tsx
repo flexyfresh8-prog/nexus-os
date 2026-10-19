@@ -6,7 +6,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   Palette, Monitor, Gauge, Keyboard, HardDrive, Info, Upload, Download,
-  RotateCcw, Trash2, Check, X, ShieldAlert,
+  RotateCcw, Trash2, Check, X, ShieldAlert, LayoutGrid, Play, Save,
 } from "lucide-react";
 import type { AppInstanceProps } from "../../types";
 import { useSettings } from "../../store/settings";
@@ -16,13 +16,15 @@ import { WALLPAPERS, ACCENTS } from "../../lib/wallpapers";
 import { formatBytes } from "../../lib/utils";
 import { downloadBackup, importBackup } from "../../lib/backup";
 import { idbCount, STORE_FS } from "../../lib/idb";
+import { WORKSPACE_PRESETS, applyPreset, saveSession, loadSessions, restoreSession, deleteSession, type SavedSession } from "../../lib/workspaces";
 import { OS_VERSION } from "../meta";
 
-type SectionId = "appearance" | "desktop" | "motion" | "shortcuts" | "storage" | "about";
+type SectionId = "appearance" | "desktop" | "workspaces" | "motion" | "shortcuts" | "storage" | "about";
 
 const SECTIONS: { id: SectionId; name: string; icon: React.ReactNode; hint: string }[] = [
   { id: "appearance", name: "Appearance", icon: <Palette size={15} />, hint: "Theme, accent, wallpaper" },
   { id: "desktop", name: "Desktop & Dock", icon: <Monitor size={15} />, hint: "Icons, clock, dock" },
+  { id: "workspaces", name: "Workspaces", icon: <LayoutGrid size={15} />, hint: "Presets, saved sessions" },
   { id: "motion", name: "Motion", icon: <Gauge size={15} />, hint: "Animations" },
   { id: "shortcuts", name: "Shortcuts", icon: <Keyboard size={15} />, hint: "Keyboard reference" },
   { id: "storage", name: "Storage & Backup", icon: <HardDrive size={15} />, hint: "Usage, backup, reset" },
@@ -301,6 +303,8 @@ export default function SettingsApp({ launchProps, setTitle }: AppInstanceProps)
           </section>
         )}
 
+        {section === "workspaces" && <WorkspacesSection />}
+
         {section === "motion" && (
           <section className="nx-fade-in">
             <h2 className="text-[15px] font-semibold text-[var(--nx-text)]">Motion</h2>
@@ -494,5 +498,118 @@ export default function SettingsApp({ launchProps, setTitle }: AppInstanceProps)
         />
       )}
     </div>
+  );
+}
+
+// ---------------- workspaces section ----------------
+
+function WorkspacesSection() {
+  const [sessions, setSessions] = useState<SavedSession[]>([]);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = () => {
+    void loadSessions().then(setSessions);
+  };
+  useEffect(refresh, []);
+
+  return (
+    <section className="nx-fade-in">
+      <h2 className="text-[15px] font-semibold text-[var(--nx-text)]">Workspaces</h2>
+      <p className="mt-0.5 text-[12px] text-[var(--nx-text-dim)]">
+        Presets arrange real application windows. Saved sessions snapshot your current layout
+        (positions, sizes, minimized state) and restore it later.
+      </p>
+
+      <h3 className="mb-2 mt-5 text-[12px] font-semibold uppercase tracking-wide text-[var(--nx-text-dim)]">
+        Presets
+      </h3>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {WORKSPACE_PRESETS.map((p) => (
+          <div key={p.id} className="nx-glass flex items-center gap-3 rounded-xl p-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-[var(--nx-text)]">{p.name}</div>
+              <p className="truncate text-[11px] text-[var(--nx-text-dim)]">{p.description}</p>
+            </div>
+            <button
+              onClick={() => {
+                setBusy(p.id);
+                void applyPreset(p).finally(() => setBusy(null));
+              }}
+              disabled={busy !== null}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[rgba(var(--nx-accent-rgb),0.15)] px-3 py-1.5 text-[11px] text-[var(--nx-accent)] transition hover:bg-[rgba(var(--nx-accent-rgb),0.25)] disabled:opacity-50"
+            >
+              <Play size={11} /> {busy === p.id ? "Arranging…" : "Apply"}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <h3 className="mb-2 mt-5 text-[12px] font-semibold uppercase tracking-wide text-[var(--nx-text-dim)]">
+        Saved sessions
+      </h3>
+      <div className="flex gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && name.trim()) {
+              void saveSession(name).then(() => {
+                setName("");
+                refresh();
+              });
+            }
+          }}
+          placeholder="Session name (e.g. Deep work)"
+          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/25 px-3 py-2 text-[12px] outline-none placeholder:text-[var(--nx-text-dim)] focus:border-[rgba(var(--nx-accent-rgb),0.5)]"
+        />
+        <button
+          onClick={() => {
+            void saveSession(name).then(() => {
+              setName("");
+              refresh();
+            });
+          }}
+          disabled={!name.trim()}
+          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-[12px] transition hover:bg-white/10 disabled:opacity-40"
+        >
+          <Save size={12} /> Save current
+        </button>
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {sessions.length === 0 ? (
+          <p className="text-[11px] text-[var(--nx-text-dim)]">
+            No saved sessions yet. Arrange some windows and save the layout.
+          </p>
+        ) : (
+          sessions.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12.5px] text-[var(--nx-text)]">{s.name}</div>
+                <div className="text-[10px] text-[var(--nx-text-dim)]">
+                  {s.windows.length} window{s.windows.length === 1 ? "" : "s"} · saved{" "}
+                  {new Date(s.ts).toLocaleString()}
+                </div>
+              </div>
+              <button
+                onClick={() => void restoreSession(s)}
+                className="shrink-0 rounded-lg bg-[rgba(var(--nx-accent-rgb),0.15)] px-2.5 py-1 text-[11px] text-[var(--nx-accent)] hover:bg-[rgba(var(--nx-accent-rgb),0.25)]"
+              >
+                Restore
+              </button>
+              <button
+                onClick={() => {
+                  void deleteSession(s.id).then(refresh);
+                }}
+                aria-label="Delete session"
+                className="shrink-0 rounded-lg p-1.5 text-[var(--nx-text-dim)] hover:bg-red-400/10 hover:text-red-400"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
   );
 }

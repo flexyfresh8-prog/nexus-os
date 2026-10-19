@@ -181,6 +181,21 @@ export default function BrowserApp({ launchProps, setTitle }: AppInstanceProps) 
     setTitle(atHome ? "Home" : safeHostname(current));
   }, [setTitle, atHome, current]);
 
+  // cross-app navigation requests (Terminal `open example.com`, Servers panel)
+  useEffect(() => {
+    let alive = true;
+    void import("../../lib/bus").then(({ on }) => {
+      if (!alive) return;
+      return on("browser:navigate", ({ url }) => {
+        navigate(url);
+      });
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const pushEntry = useCallback((entry: string) => {
     setHistory((h) => {
       if (h.entries[h.idx] === entry) return h;

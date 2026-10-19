@@ -1,11 +1,13 @@
 "use client";
 
-// NEXUS OS — AI provider abstraction (BYOK, browser-direct, no proxy).
-// Two provider dialects: OpenAI-compatible /chat/completions and Anthropic
-// /v1/messages (with the direct-browser-access header). All requests carry
-// the user's own API key straight to the endpoint they configured.
+// NEXUS OS — AI provider abstraction.
+// Three provider dialects:
+//   "openai-compatible" — BYOK, direct from the browser to any compatible endpoint
+//   "anthropic"         — BYOK with the direct-browser-access header
+//   "nexus-backend"     — proxied through this deployment's /api/ai/chat route
+//                         (model + key stay server-side; nothing to configure)
 
-export type ProviderType = "openai-compatible" | "anthropic";
+export type ProviderType = "openai-compatible" | "anthropic" | "nexus-backend";
 
 export interface ProviderConfig {
   type: ProviderType;
@@ -51,6 +53,7 @@ export class RequestAbortedError extends Error {
 export const DEFAULT_BASE_URLS: Record<ProviderType, string> = {
   "openai-compatible": "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
+  "nexus-backend": "",
 };
 
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -316,6 +319,92 @@ async function chatAnthropic(
   return { text: textParts.join("\n"), toolCalls };
 }
 
+// ---------------- Nexus backend (server-side model, no key in browser) ----------------
+
+async function chatBackend(
+  _cfg: ProviderConfig,
+  messages: LLMMessage[],
+  tools: ToolSpec[],
+  signal?: AbortSignal
+): Promise<ChatResult> {
+  const wire: unknown[] = messages.map((m) => {
+    if (m.role === "tool") {
+      return { role: "tool", tool_call_id: m.toolCallId ?? m.toolName ?? "", content: m.content };
+    }
+    if (m.role === "assistant") {
+      const o: Record<string, unknown> = { role: "assistant", content: m.content || null };
+      if (m.toolCalls && m.toolCalls.length > 0) {
+        o.tool_calls = m.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+        }));
+      }
+      return o;
+    }
+    return { role: m.role, content: m.content };
+  });
+
+  const body: Record<string, unknown> = { messages: wire };
+  if (tools.length > 0) {
+    body.tools = tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+  }
+
+  let res: Response;
+  try {
+    res = await fetch("/api/ai/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    throw networkError(e, signal);
+  }
+
+  const raw = await res.text().catch(() => "");
+  if (!res.ok) {
+    const d = detailFrom(raw);
+    throw new Error(
+      res.status === 404
+        ? "The NEXUS AI backend is not available on this deployment (static hosting has no server routes). Configure a BYOK provider instead."
+        : `NEXUS backend error (HTTP ${res.status}): ${d}`
+    );
+  }
+  let data: OpenAIResponseShape;
+  try {
+    data = JSON.parse(raw) as OpenAIResponseShape;
+  } catch {
+    throw new Error("NEXUS backend returned a non-JSON response.");
+  }
+
+  const msg = data.choices?.[0]?.message;
+  const text = typeof msg?.content === "string" ? msg.content : "";
+  const toolCalls: ToolCallOut[] = [];
+  for (const tc of msg?.tool_calls ?? []) {
+    const id = tc.id;
+    const name = tc.function?.name;
+    if (!id || !name) continue;
+    let args: Record<string, unknown> = {};
+    const argStr = tc.function?.arguments;
+    if (typeof argStr === "string" && argStr.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(argStr);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>;
+        }
+      } catch {
+        args = { _raw: argStr.slice(0, 500) };
+      }
+    }
+    toolCalls.push({ id, name, args });
+  }
+  return { text, toolCalls };
+}
+
 // ---------------- public entry point ----------------
 
 export async function chat(
@@ -324,6 +413,10 @@ export async function chat(
   tools: ToolSpec[],
   signal?: AbortSignal
 ): Promise<ChatResult> {
+  if (cfg.type === "nexus-backend") {
+    // nothing to validate — the backend holds the credentials
+    return chatBackend(cfg, messages, tools, signal);
+  }
   if (!cfg.apiKey) {
     throw new Error("No API key configured. Open the provider settings (gear icon) and add one.");
   }

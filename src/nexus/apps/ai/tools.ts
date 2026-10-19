@@ -14,10 +14,13 @@ import {
   childrenOf,
   descendantsOf,
   extOf,
+  isTextFile,
   nodeSize,
+  pathOf,
   resolvePath,
   validateFileName,
 } from "../../lib/vfs";
+import { useRuntime, vfsToContainerTree } from "../../store/runtime";
 import { formatBytes } from "../../lib/utils";
 import type { ToolSpec } from "./providers";
 
@@ -95,7 +98,9 @@ function requireFSReady(): void {
 function ensureDirId(relFromHome: string): string {
   requireFSReady();
   const err = useFS.getState().mkdirAtPath(relFromHome, HOME_ID);
-  const res = resolvePath(useFS.getState().nodes, HOME_ID, "/" + relFromHome);
+  // NOTE: no leading slash — resolvePath treats "/" as root-absolute, and
+  // these paths are relative to /home
+  const res = resolvePath(useFS.getState().nodes, HOME_ID, relFromHome);
   const id = res && res.id ? res.id : "";
   const node = id ? useFS.getState().nodes[id] : undefined;
   if (!node || node.type !== "dir") {
@@ -452,6 +457,67 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
     risk: "read",
   },
+  {
+    name: "run_js",
+    description:
+      "Execute JavaScript in a sandboxed Web Worker (no DOM, no NEXUS state) and return its console output, errors and exit code. Use for computation, algorithms, quick scripts.",
+    parameters: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "JavaScript source to execute" },
+        timeout_ms: { type: "number", description: "Optional timeout (default 10000, max 30000)" },
+      },
+      required: ["code"],
+    },
+    risk: "write",
+  },
+  {
+    name: "run_node",
+    description:
+      "Run a .js file with real Node.js in the WebContainer runtime (needs cross-origin isolation). The project directory is synced from the virtual filesystem first. Returns the real stdout/stderr and exit code.",
+    parameters: {
+      type: "object",
+      properties: {
+        project_path: { type: "string", description: "Project folder, e.g. /home/Projects/my-app" },
+        file: { type: "string", description: "Entry file relative to the project, e.g. index.js" },
+      },
+      required: ["project_path", "file"],
+    },
+    risk: "danger",
+  },
+  {
+    name: "npm_run",
+    description:
+      "Run an npm command (e.g. install, run dev) in the WebContainer runtime. Real dependency installation against the real npm registry.",
+    parameters: {
+      type: "object",
+      properties: {
+        project_path: { type: "string", description: "Project folder containing package.json" },
+        args: { type: "array", items: { type: "string" }, description: "npm arguments, e.g. ['install'] or ['run','dev']" },
+        server: { type: "boolean", description: "true when the command starts a long-running dev server" },
+      },
+      required: ["project_path", "args"],
+    },
+    risk: "danger",
+  },
+  {
+    name: "list_processes",
+    description: "List running NEXUS processes (workers, Node commands, dev servers) with state and URLs.",
+    parameters: { type: "object", properties: {} },
+    risk: "read",
+  },
+  {
+    name: "kill_process",
+    description: "Terminate a running process by id (see list_processes). Requires user approval.",
+    parameters: {
+      type: "object",
+      properties: {
+        process_id: { type: "string" },
+      },
+      required: ["process_id"],
+    },
+    risk: "danger",
+  },
 ];
 
 // ---------------- validation + execution ----------------
@@ -529,7 +595,36 @@ export function validateToolCall(name: string, args: unknown): string | null {
       return null;
     }
     case "list_apps":
+    case "list_processes":
       return null;
+    case "run_js": {
+      const e = needStr(a, "code");
+      if (e) return e;
+      if ((a.code as string).length > MAX_CONTENT_CHARS) {
+        return `"code" exceeds the ${MAX_CONTENT_CHARS}-character limit.`;
+      }
+      if (a.timeout_ms !== undefined && (typeof a.timeout_ms !== "number" || a.timeout_ms < 500 || a.timeout_ms > 30000)) {
+        return `"timeout_ms" must be a number between 500 and 30000.`;
+      }
+      return null;
+    }
+    case "run_node":
+    case "npm_run": {
+      const e = needStr(a, "project_path");
+      if (e) return e;
+      if (name === "run_node") {
+        const e2 = needStr(a, "file");
+        if (e2) return e2;
+      }
+      if (name === "npm_run") {
+        if (!Array.isArray(a.args) || a.args.length === 0 || !a.args.every((x) => typeof x === "string")) {
+          return `"args" must be a non-empty array of strings.`;
+        }
+      }
+      return null;
+    }
+    case "kill_process":
+      return needStr(a, "process_id");
     default:
       return `Unknown tool "${name}".`;
   }
@@ -561,6 +656,16 @@ export async function executeTool(
       return { summary: tListApps() };
     case "validate_project":
       return { summary: tValidateProject(args) };
+    case "run_js":
+      return { summary: await tRunJs(args) };
+    case "run_node":
+      return { summary: await tRunNode(args) };
+    case "npm_run":
+      return { summary: await tNpmRun(args) };
+    case "list_processes":
+      return { summary: tListProcesses() };
+    case "kill_process":
+      return { summary: await tKillProcess(args) };
     default:
       throw new Error(`Unknown tool "${name}".`);
   }
@@ -593,4 +698,113 @@ export async function executeToolWithApproval(
     }
   }
   return executeTool(name, args);
+}
+
+// ---------------- runtime tool implementations ----------------
+
+async function tRunJs(args: Record<string, unknown>): Promise<string> {
+  const code = String(args.code);
+  const timeout = typeof args.timeout_ms === "number" ? args.timeout_ms : 10000;
+  const res = await useRuntime.getState().workerRun(code, timeout);
+  const parts: string[] = [];
+  if (res.logs.length) parts.push(`console output:\n${res.logs.join("\n")}`);
+  else parts.push("(no console output)");
+  if (res.error) parts.push(`error: ${res.error}`);
+  parts.push(`exit code: ${res.exitCode} (sandboxed Web Worker, ${res.durationMs}ms)`);
+  return parts.join("\n");
+}
+
+async function tRunNode(args: Record<string, unknown>): Promise<string> {
+  const canon = guardPath(args.project_path, "project_path");
+  const node = requireNode(canon);
+  if (node.type !== "dir") throw new Error(`${canon} is not a project directory.`);
+  const runtime = useRuntime.getState();
+  runtime.checkCaps();
+  if (!runtime.caps.webcontainer) {
+    throw new Error(
+      "The Node runtime (WebContainer) is unavailable on this surface — it needs cross-origin isolation (open NEXUS in its own browser tab). Use run_js instead for plain JavaScript."
+    );
+  }
+  const wc = await runtime.ensureWebContainer();
+  const files = collectProjectTextFiles(node.id);
+  await wc.mount(vfsToContainerTree(files));
+  const file = String(args.file).replace(/^\/+/, "");
+  const res = await runtime.wcRun({ command: "node", args: [file], label: `node ${file}` });
+  const parts = [
+    res.output.length ? res.output.join("\n") : "(no output)",
+    `exit code: ${res.exitCode}`,
+  ];
+  if (res.exitCode !== 0) {
+    parts.push("Diagnose the error above, fix the project files with write_file, then run again.");
+  }
+  return parts.join("\n");
+}
+
+async function tNpmRun(args: Record<string, unknown>): Promise<string> {
+  const canon = guardPath(args.project_path, "project_path");
+  const node = requireNode(canon);
+  if (node.type !== "dir") throw new Error(`${canon} is not a project directory.`);
+  const hasPkg = childrenOf(useFS.getState().nodes, node.id).some((n) => n.name === "package.json");
+  if (!hasPkg) throw new Error(`${canon} has no package.json — create one first (see create_project).`);
+  const runtime = useRuntime.getState();
+  runtime.checkCaps();
+  if (!runtime.caps.webcontainer) {
+    throw new Error(
+      "The Node runtime (WebContainer) is unavailable on this surface — it needs cross-origin isolation (open NEXUS in its own browser tab)."
+    );
+  }
+  const wc = await runtime.ensureWebContainer();
+  const files = collectProjectTextFiles(node.id);
+  await wc.mount(vfsToContainerTree(files));
+  const npmArgs = (args.args as string[]).map(String);
+  const server = args.server === true;
+  const res = await runtime.wcRun({ command: "npm", args: npmArgs, server, label: `npm ${npmArgs.join(" ")}` });
+  if (server) {
+    return `npm ${npmArgs.join(" ")} is running as a server process. Watch for a server-ready URL via list_processes — surface it to the user and offer to open it in the Browser.`;
+  }
+  return [
+    res.output.length ? res.output.join("\n") : "(no output)",
+    `exit code: ${res.exitCode}`,
+  ].join("\n");
+}
+
+function tListProcesses(): string {
+  const procs = useRuntime.getState().processes;
+  if (procs.length === 0) return "No processes running.";
+  return procs
+    .map(
+      (p) =>
+        `- ${p.id} [${p.env}] ${p.command} — ${p.state}${p.exitCode !== undefined ? ` (exit ${p.exitCode})` : ""}${p.url ? ` → ${p.url}` : ""}`
+    )
+    .join("\n");
+}
+
+async function tKillProcess(args: Record<string, unknown>): Promise<string> {
+  const id = String(args.process_id);
+  const proc = useRuntime.getState().processes.find((p) => p.id === id || p.id.startsWith(id));
+  if (!proc) throw new Error(`No such process: ${id}. Check list_processes output.`);
+  await useRuntime.getState().kill(proc.id);
+  return `Terminated ${proc.command} (${proc.id}).`;
+}
+
+/** Text-file snapshot of a project for the Node runtime (skips .git/node_modules/binaries). */
+function collectProjectTextFiles(rootId: string): Array<{ relPath: string; content: string }> {
+  const skip = new Set(["node_modules", ".git"]);
+  const nodes = useFS.getState().nodes;
+  const rootPath = pathOf(nodes, rootId);
+  const out: Array<{ relPath: string; content: string }> = [];
+  const walk = (id: string) => {
+    for (const child of childrenOf(nodes, id)) {
+      const rel = pathOf(nodes, child.id).slice(rootPath.length + 1);
+      if (child.type === "dir") {
+        if (!skip.has(child.name)) walk(child.id);
+        continue;
+      }
+      if (!isTextFile(child.name, child.mime) || typeof child.content !== "string") continue;
+      if (child.content.length > 800_000) continue;
+      out.push({ relPath: rel.replace(/\\/g, "/"), content: child.content });
+    }
+  };
+  walk(rootId);
+  return out;
 }

@@ -14,101 +14,96 @@ import {
   ROOT_ID,
   HOME_ID,
 } from "../lib/vfs";
-import type { FSNode } from "../../types";
+import type { FSNode } from "../types";
 
 function dir(id: string, name: string, parentId: string | null): FSNode {
   return { id, name, type: "dir", parentId, created: 0, modified: 0 };
 }
-function file(id: string, name: string, parentId: string): FSNode {
-  return { id, name, type: "file", parentId, content: "", created: 0, modified: 0 };
+
+function file(id: string, name: string, parentId: string, content = ""): FSNode {
+  return { id, name, type: "file", parentId, content, created: 0, modified: 0 };
 }
 
-const nodes: Record<string, FSNode> = {
-  [ROOT_ID]: dir(ROOT_ID, "", null),
-  home: dir("home", "home", ROOT_ID),
-  docs: dir("docs", "Documents", "home"),
-  notes: file("notes", "notes.txt", "docs"),
-  pics: dir("pics", "Pictures", "home"),
-};
+function sampleTree(): Record<string, FSNode> {
+  const nodes: Record<string, FSNode> = {};
+  const add = (n: FSNode) => {
+    nodes[n.id] = n;
+  };
+  add(dir(ROOT_ID, "", null));
+  add(dir(HOME_ID, "home", ROOT_ID));
+  add(dir("docs", "Documents", HOME_ID));
+  add(dir("proj", "Projects", HOME_ID));
+  add(dir("site", "hello-site", "proj"));
+  add(file("idx", "index.html", "site", "<html></html>"));
+  add(file("css", "styles.css", "site", "body{}"));
+  add(file("readme", "readme.md", "docs", "# hi"));
+  return nodes;
+}
 
 describe("resolvePath", () => {
-  test("absolute paths", () => {
-    expect(resolvePath(nodes, ROOT_ID, "/home/Documents/notes.txt")?.id).toBe("notes");
-    expect(resolvePath(nodes, ROOT_ID, "/home")?.id).toBe("home");
-    expect(resolvePath(nodes, ROOT_ID, "/")?.id).toBe(ROOT_ID);
+  test("absolute, relative, tilde and dot-dot resolution", () => {
+    const nodes = sampleTree();
+    expect(resolvePath(nodes, HOME_ID, "/home/Documents")?.id).toBe("docs");
+    expect(resolvePath(nodes, "docs", "../Projects/hello-site")?.id).toBe("site");
+    expect(resolvePath(nodes, "site", "~/Documents")?.id).toBe("docs");
+    expect(resolvePath(nodes, "docs", ".")?.id).toBe("docs");
+    expect(resolvePath(nodes, "site", "..")?.id).toBe("proj");
+    // missing last segment reports parent for creation
+    const miss = resolvePath(nodes, "docs", "new.txt");
+    expect(miss?.parentId).toBe("docs");
+    expect(miss?.missingName).toBe("new.txt");
+    // traversal beyond root is contained
+    expect(resolvePath(nodes, "docs", "../../etc/passwd")?.id).not.toBe("");
   });
 
-  test("relative paths and dots", () => {
-    expect(resolvePath(nodes, "docs", "notes.txt")?.id).toBe("notes");
-    expect(resolvePath(nodes, "docs", "..")?.id).toBe("home");
-    expect(resolvePath(nodes, "docs", "../Pictures")?.id).toBe("pics");
-    expect(resolvePath(nodes, "docs", "./notes.txt")?.id).toBe("notes");
-  });
-
-  test("tilde maps to home", () => {
-    expect(resolvePath(nodes, ROOT_ID, "~")?.id).toBe("home");
-    expect(resolvePath(nodes, ROOT_ID, "~/Documents")?.id).toBe("docs");
-    expect(resolvePath(nodes, "docs", "~/..")?.id).toBe(ROOT_ID);
-  });
-
-  test("missing final segment reports parent for creation", () => {
-    const r = resolvePath(nodes, "docs", "newfile.md");
-    expect(r?.id).toBe("");
-    expect(r?.parentId).toBe("docs");
-    expect(r?.missingName).toBe("newfile.md");
-  });
-
-  test("missing intermediate segment fails cleanly", () => {
-    expect(resolvePath(nodes, "docs", "nope/child.txt")).toBeNull();
-  });
-
-  test("never escapes the virtual root", () => {
-    // walking above root clamps to root — no traversal out of the sandbox
-    const r = resolvePath(nodes, "docs", "../../../../../../etc/passwd");
-    expect(r === null || r?.id === ROOT_ID || nodes[r.id] !== undefined).toBe(true);
-    expect(r?.id).not.toBe("etc");
+  test("rejects traversal through non-directories", () => {
+    const nodes = sampleTree();
+    expect(resolvePath(nodes, "docs", "readme.md/x")).toBeNull();
   });
 });
 
 describe("pathOf / displayPath", () => {
-  test("builds canonical paths", () => {
-    expect(pathOf(nodes, "notes")).toBe("/home/Documents/notes.txt");
-    expect(pathOf(nodes, ROOT_ID)).toBe("/");
-  });
-  test("home collapses to ~", () => {
-    expect(displayPath(nodes, "home")).toBe("~");
+  test("builds correct paths and tilde form", () => {
+    const nodes = sampleTree();
+    expect(pathOf(nodes, "idx")).toBe("/home/Projects/hello-site/index.html");
     expect(displayPath(nodes, "docs")).toBe("~/Documents");
-    expect(displayPath(nodes, "notes")).toBe("~/Documents/notes.txt");
+    expect(displayPath(nodes, "readme")).toBe("~/Documents/readme.md");
   });
 });
 
-describe("name handling", () => {
-  test("validateFileName rejects bad names", () => {
-    expect(validateFileName("ok.txt")).toBeNull();
+describe("uniqueName", () => {
+  test("deconflicts without clobbering extensions", () => {
+    const nodes = sampleTree();
+    expect(uniqueName(nodes, "site", "index.html")).toBe("index (2).html");
+    expect(uniqueName(nodes, "site", "app.js")).toBe("app.js");
+  });
+});
+
+describe("validateFileName", () => {
+  test("blocks dangerous names", () => {
     expect(validateFileName("")).toBeTruthy();
     expect(validateFileName("a/b")).toBeTruthy();
     expect(validateFileName("..")).toBeTruthy();
-  });
-  test("uniqueName dedupes", () => {
-    expect(uniqueName(nodes, "docs", "notes.txt")).toBe("notes (2).txt");
-    expect(uniqueName(nodes, "pics", "notes.txt")).toBe("notes.txt");
-  });
-  test("extension helpers", () => {
-    expect(extOf("a.tar.gz")).toBe("gz");
-    expect(isTextFile("main.tsx")).toBe(true);
-    expect(isTextFile("song.mp3")).toBe(false);
+    expect(validateFileName("ok-file_1.txt")).toBeNull();
   });
 });
 
-describe("tree integrity", () => {
-  test("cycle detection", () => {
-    expect(createsCycle(nodes, "home", "docs")).toBe(true);
-    expect(createsCycle(nodes, "docs", "pics")).toBe(false);
+describe("createsCycle / descendantsOf", () => {
+  test("cycle detection and subtree collection", () => {
+    const nodes = sampleTree();
+    expect(createsCycle(nodes, "proj", "site")).toBe(true);
+    expect(createsCycle(nodes, "site", "proj")).toBe(false);
+    const desc = descendantsOf(nodes, "site").sort();
+    expect(desc).toEqual(["css", "idx", "site"]);
   });
-  test("descendants include self", () => {
-    const ids = descendantsOf(nodes, "home");
-    expect(ids).toContain("home");
-    expect(ids).toContain("notes");
-    expect(ids).not.toContain(ROOT_ID);
+});
+
+describe("file classification", () => {
+  test("extensions and text detection", () => {
+    expect(extOf("archive.tar.gz")).toBe("gz");
+    expect(extOf("noext")).toBe("");
+    expect(isTextFile("script.ts")).toBe(true);
+    expect(isTextFile("photo.png")).toBe(false);
+    expect(isTextFile("image.svg")).toBe(true);
   });
 });

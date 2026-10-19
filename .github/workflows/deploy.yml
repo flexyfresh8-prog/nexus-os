@@ -33,10 +33,7 @@ jobs:
         run: bun test src/nexus
 
       - name: Build static export
-        env:
-          DEPLOY_TARGET: gh-pages
-          GH_REPO_NAME: nexus-os
-        run: bunx next build
+        run: bun run build:pages
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

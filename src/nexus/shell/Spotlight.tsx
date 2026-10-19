@@ -3,17 +3,18 @@
 // NEXUS OS — global search (Ctrl/Cmd+K): apps, files, settings, actions
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Search, Folder, FileText, AppWindow, Settings2, CornerDownLeft } from "lucide-react";
+import { Search, Folder, FileText, AppWindow, Settings2, CornerDownLeft, LayoutGrid } from "lucide-react";
 import { useOS } from "../store/os";
 import { useFS } from "../store/fs";
 import { APP_META } from "../apps/meta";
 import { AppIcon } from "../apps/AppIcon";
 import { fuzzyScore } from "../lib/utils";
-import { displayPath, isTextFile } from "../lib/vfs";
+import { displayPath } from "../lib/vfs";
+import { WORKSPACE_PRESETS, applyPreset } from "../lib/workspaces";
 
 interface Result {
   id: string;
-  group: "Apps" | "Files & Folders" | "Settings" | "Actions";
+  group: "Apps" | "Files & Folders" | "Settings" | "Actions" | "Workspaces";
   title: string;
   subtitle?: string;
   score: number;
@@ -105,11 +106,14 @@ export function Spotlight() {
                 <FileText size={26} className="text-sky-300" />
               ),
             run: () => {
-              if (node.type === "file" && isTextFile(node.name, node.mime)) {
-                launch("studio", { openFileId: node.id });
-              } else {
+              if (node.type === "dir") {
                 launch("files", { openId: node.id });
+                return;
               }
+              void (async () => {
+                const { openFileWithBestApp } = await import("../lib/open");
+                openFileWithBestApp(node.id);
+              })();
             },
           });
         }
@@ -127,6 +131,20 @@ export function Spotlight() {
         run: () => launch("terminal"),
       });
     }
+    // workspace presets
+    for (const p of WORKSPACE_PRESETS) {
+      const s = Math.max(fuzzyScore(q, p.name), fuzzyScore(q, `${p.id} workspace preset`));
+      if (s >= 0)
+        out.push({
+          id: `ws-${p.id}`,
+          group: "Workspaces",
+          title: `${p.name} workspace`,
+          subtitle: p.description,
+          score: s + 1,
+          icon: <LayoutGrid size={26} className="text-[var(--nx-text-dim)]" />,
+          run: () => void applyPreset(p),
+        });
+    }
     return out
       .filter((r) => q.trim() === "" ? r.group === "Apps" || r.group === "Actions" : true)
       .sort((a, b) => b.score - a.score)
@@ -137,7 +155,7 @@ export function Spotlight() {
 
   if (!open) return null;
 
-  const groups: Result["group"][] = ["Apps", "Actions", "Files & Folders", "Settings"];
+  const groups: Result["group"][] = ["Apps", "Actions", "Files & Folders", "Settings", "Workspaces"];
   let flatIdx = -1;
 
   const runResult = (r?: Result) => {

@@ -25,6 +25,7 @@ import {
   FileSearch,
   Folder,
   FolderPlus,
+  GitBranch,
   Package,
   PanelBottom,
   PanelLeft,
@@ -33,6 +34,7 @@ import {
   RotateCw,
   Save,
   Search,
+  Server,
   TerminalSquare,
   X,
 } from "lucide-react";
@@ -55,6 +57,8 @@ import { PROJECT_TEMPLATES, templateById } from "./templates";
 import FileTree, { fileIcon } from "./FileTree";
 import PreviewPane, { buildPreviewDoc, isRuntimePayload, type PreviewFile } from "./PreviewPane";
 import TerminalPanel from "./TerminalPanel";
+import { GitPanel } from "./GitPanel";
+import { ServersPanel } from "./ServersPanel";
 
 // ------------------------------------------------------------------ helpers
 
@@ -547,7 +551,7 @@ export default function StudioApp({ windowId, launchProps, setTitle }: AppInstan
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [explorerOpen, setExplorerOpen] = useState(true);
-  const [panelTab, setPanelTab] = useState<"terminal" | "problems" | "search" | null>("terminal");
+  const [panelTab, setPanelTab] = useState<"terminal" | "problems" | "search" | "git" | "servers" | null>("terminal");
   const [panelH, setPanelH] = useState(240);
   const [previewOpen, setPreviewOpen] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -1499,6 +1503,18 @@ export default function StudioApp({ windowId, launchProps, setTitle }: AppInstan
                 icon={Search}
                 label="Search"
               />
+              <PanelTabBtn
+                active={panelTab === "git"}
+                onClick={() => setPanelTab("git")}
+                icon={GitBranch}
+                label="Git"
+              />
+              <PanelTabBtn
+                active={panelTab === "servers"}
+                onClick={() => setPanelTab("servers")}
+                icon={Server}
+                label="Servers"
+              />
               <div className="ml-auto">
                 <MiniBtn title="Hide panel" onClick={() => setPanelTab(null)}>
                   <X size={13} />
@@ -1596,6 +1612,20 @@ export default function StudioApp({ windowId, launchProps, setTitle }: AppInstan
                     ))
                   )}
                 </div>
+              </div>
+              <div
+                className={`absolute inset-0 ${
+                  panelTab === "git" ? "" : "hidden"
+                }`}
+              >
+                {projectId ? <GitPanel projectId={projectId} /> : null}
+              </div>
+              <div
+                className={`absolute inset-0 ${
+                  panelTab === "servers" ? "" : "hidden"
+                }`}
+              >
+                {projectId ? <ServersPanel projectId={projectId} /> : null}
               </div>
             </div>
           </div>

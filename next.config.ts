@@ -18,6 +18,20 @@ const nextConfig: NextConfig = isPages
       output: "standalone",
       typescript: { ignoreBuildErrors: true },
       reactStrictMode: false,
+      // Cross-origin isolation: required by the Node runtime (WebContainers).
+      // credentialless (not require-corp) so the Monaco CDN and external
+      // iframe previews keep loading without CORP headers.
+      async headers() {
+        return [
+          {
+            source: "/(.*)",
+            headers: [
+              { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+              { key: "Cross-Origin-Embedder-Policy", value: "credentialless" },
+            ],
+          },
+        ];
+      },
     };
 
 export default nextConfig;

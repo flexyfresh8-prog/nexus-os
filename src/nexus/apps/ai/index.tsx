@@ -91,12 +91,20 @@ const NXAI_CSS = `
 
 class StopError extends Error {}
 
-const providerSchema = z.object({
-  type: z.enum(["openai-compatible", "anthropic"]),
-  baseUrl: z.string().min(1),
-  apiKey: z.string().min(1),
-  model: z.string().min(1),
-});
+const providerSchema = z.union([
+  z.object({
+    type: z.literal("nexus-backend"),
+    baseUrl: z.string().max(0).optional().default(""),
+    apiKey: z.string().max(0).optional().default(""),
+    model: z.string().optional().default(""),
+  }),
+  z.object({
+    type: z.enum(["openai-compatible", "anthropic"]),
+    baseUrl: z.string().min(1),
+    apiKey: z.string().min(1),
+    model: z.string().min(1),
+  }),
+]);
 
 function parseConfig(v: unknown): ProviderConfig | null {
   const r = providerSchema.safeParse(v);
@@ -579,6 +587,7 @@ function ConfigScreen({
 }) {
   const [showKey, setShowKey] = useState(false);
   const placeholder = form.type === "anthropic" ? "claude-sonnet-4-5" : "gpt-4o-mini";
+  const isBackend = form.type === "nexus-backend";
   return (
     <div className="nx-scroll h-full overflow-y-auto p-4">
       <div className="mx-auto max-w-lg">
@@ -591,17 +600,25 @@ function ConfigScreen({
               Connect an AI provider
             </div>
             <div className="text-[11px] text-[var(--nx-text-dim)]">
-              Bring your own key — nothing leaves this device except provider calls.
+              Use the built-in NEXUS backend, or bring your own key.
             </div>
           </div>
         </div>
         <div className="nx-glass space-y-4 rounded-2xl p-4">
-          <p className="text-xs leading-relaxed text-[var(--nx-text-dim)]">
-            NEXUS OS runs fully in your browser. Connect an AI provider with your own API key. The
-            key is stored locally in IndexedDB on this device and is sent ONLY to the provider
-            endpoint you configure. No proxy server exists (this app is statically hosted), so
-            choose providers that allow browser CORS calls.
-          </p>
+          {isBackend ? (
+            <p className="text-xs leading-relaxed text-[var(--nx-text-dim)]">
+              The <b>NEXUS backend</b> routes requests through this deployment&apos;s own server
+              route — the model and its credentials stay server-side and never touch the browser.
+              Nothing to configure. If this copy of NEXUS is statically hosted (no server
+              routes), pick a BYOK provider below instead.
+            </p>
+          ) : (
+            <p className="text-xs leading-relaxed text-[var(--nx-text-dim)]">
+              Bring your own key. The key is stored locally in IndexedDB on this device and is
+              sent ONLY to the provider endpoint you configure. BYOK calls go straight from the
+              browser, so choose providers that allow browser CORS calls.
+            </p>
+          )}
           {form.type === "anthropic" && (
             <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-400">
               Anthropic requires the header{" "}
@@ -624,39 +641,42 @@ function ConfigScreen({
               }}
               className={inputCls}
             >
-              <option value="openai-compatible">OpenAI-compatible</option>
-              <option value="anthropic">Anthropic</option>
+              <option value="nexus-backend">NEXUS backend (built-in)</option>
+              <option value="openai-compatible">OpenAI-compatible (BYOK)</option>
+              <option value="anthropic">Anthropic (BYOK)</option>
             </select>
           </div>
-          <div>
-            <label htmlFor="nxai-baseurl" className={labelCls}>
-              Base URL
-            </label>
-            <input
-              id="nxai-baseurl"
-              value={form.baseUrl}
-              onChange={(e) => onPatch({ baseUrl: e.target.value })}
-              placeholder={DEFAULT_BASE_URLS[form.type]}
-              className={inputCls}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </div>
-          <div>
-            <label htmlFor="nxai-key" className={labelCls}>
-              API key
-            </label>
-            <div className="relative">
-              <input
-                id="nxai-key"
-                type={showKey ? "text" : "password"}
-                value={form.apiKey}
-                onChange={(e) => onPatch({ apiKey: e.target.value })}
-                placeholder="Paste your key"
-                className={`${inputCls} pr-10`}
-                spellCheck={false}
-                autoComplete="off"
-              />
+          {!isBackend && (
+            <>
+              <div>
+                <label htmlFor="nxai-baseurl" className={labelCls}>
+                  Base URL
+                </label>
+                <input
+                  id="nxai-baseurl"
+                  value={form.baseUrl}
+                  onChange={(e) => onPatch({ baseUrl: e.target.value })}
+                  placeholder={DEFAULT_BASE_URLS[form.type]}
+                  className={inputCls}
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+              </div>
+              <div>
+                <label htmlFor="nxai-key" className={labelCls}>
+                  API key
+                </label>
+                <div className="relative">
+                  <input
+                    id="nxai-key"
+                    type={showKey ? "text" : "password"}
+                    value={form.apiKey}
+                    onChange={(e) => onPatch({ apiKey: e.target.value })}
+                    placeholder="Paste your key"
+                    className={`${inputCls} pr-10`}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
               <button
                 type="button"
                 onClick={() => setShowKey((v) => !v)}
@@ -681,6 +701,8 @@ function ConfigScreen({
               autoComplete="off"
             />
           </div>
+            </>
+          )}
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -734,8 +756,8 @@ export default function AIApp(_props: AppInstanceProps) {
   const [view, setView] = useState<View>("loading");
   const [cfg, setCfg] = useState<ProviderConfig | null>(null);
   const [form, setForm] = useState<ProviderConfig>({
-    type: "openai-compatible",
-    baseUrl: DEFAULT_BASE_URLS["openai-compatible"],
+    type: "nexus-backend",
+    baseUrl: "",
     apiKey: "",
     model: "",
   });
@@ -771,6 +793,20 @@ export default function AIApp(_props: AppInstanceProps) {
           setCfg(parsed);
           setView("chat");
         } else {
+          // no saved config: probe the NEXUS backend first — when this
+          // deployment has server routes, AI works with zero configuration
+          try {
+            const res = await fetch("/api/ai/chat", { method: "GET" });
+            const probe = (await res.json().catch(() => null)) as { ok?: boolean } | null;
+            if (res.ok && probe?.ok === true) {
+              const backendCfg: ProviderConfig = { type: "nexus-backend", baseUrl: "", apiKey: "", model: "" };
+              cfgRef.current = backendCfg;
+              setCfg(backendCfg);
+              setForm(backendCfg);
+              setView("chat");
+              return;
+            }
+          } catch { /* static hosting — fall through to BYOK config */ }
           setView("config");
         }
         setTasks(await loadTasks());
@@ -1050,8 +1086,8 @@ export default function AIApp(_props: AppInstanceProps) {
     setTest({ kind: "idle" });
     setForm(
       cfg ?? {
-        type: "openai-compatible",
-        baseUrl: DEFAULT_BASE_URLS["openai-compatible"],
+        type: "nexus-backend",
+        baseUrl: "",
         apiKey: "",
         model: "",
       }
@@ -1060,17 +1096,20 @@ export default function AIApp(_props: AppInstanceProps) {
   };
 
   const saveConfig = () => {
-    const clean: ProviderConfig = {
-      type: form.type,
-      baseUrl: form.baseUrl.trim() || DEFAULT_BASE_URLS[form.type],
-      apiKey: form.apiKey.trim(),
-      model: form.model.trim(),
-    };
-    if (!clean.apiKey) {
+    const clean: ProviderConfig =
+      form.type === "nexus-backend"
+        ? { type: "nexus-backend", baseUrl: "", apiKey: "", model: "" }
+        : {
+            type: form.type,
+            baseUrl: form.baseUrl.trim() || DEFAULT_BASE_URLS[form.type],
+            apiKey: form.apiKey.trim(),
+            model: form.model.trim(),
+          };
+    if (form.type !== "nexus-backend" && !clean.apiKey) {
       setTest({ kind: "fail", error: "An API key is required." });
       return;
     }
-    if (!clean.model) {
+    if (form.type !== "nexus-backend" && !clean.model) {
       setTest({ kind: "fail", error: "A model name is required." });
       return;
     }
@@ -1092,13 +1131,16 @@ export default function AIApp(_props: AppInstanceProps) {
 
   const runTest = () => {
     if (test.kind === "testing") return;
-    const candidate: ProviderConfig = {
-      type: form.type,
-      baseUrl: form.baseUrl.trim() || DEFAULT_BASE_URLS[form.type],
-      apiKey: form.apiKey.trim(),
-      model: form.model.trim(),
-    };
-    if (!candidate.apiKey || !candidate.model) {
+    const candidate: ProviderConfig =
+      form.type === "nexus-backend"
+        ? { type: "nexus-backend", baseUrl: "", apiKey: "", model: "" }
+        : {
+            type: form.type,
+            baseUrl: form.baseUrl.trim() || DEFAULT_BASE_URLS[form.type],
+            apiKey: form.apiKey.trim(),
+            model: form.model.trim(),
+          };
+    if (form.type !== "nexus-backend" && (!candidate.apiKey || !candidate.model)) {
       setTest({ kind: "fail", error: "Enter an API key and a model name first." });
       return;
     }

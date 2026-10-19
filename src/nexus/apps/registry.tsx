@@ -23,6 +23,14 @@ export const APP_COMPONENTS: Record<string, ComponentType<AppInstanceProps>> = {
   studio: dynamic(() => import("./studio"), { ssr: false, loading }),
   ai: dynamic(() => import("./ai"), { ssr: false, loading }),
   browser: dynamic(() => import("./browser"), { ssr: false, loading }),
+  monitor: dynamic(() => import("./monitor"), { ssr: false, loading }),
+  notes: dynamic(() => import("./notes"), { ssr: false, loading }),
+  calc: dynamic(() => import("./calc"), { ssr: false, loading }),
+  tasks: dynamic(() => import("./tasks"), { ssr: false, loading }),
+  media: dynamic(() => import("./media"), { ssr: false, loading }),
+  images: dynamic(() => import("./images"), { ssr: false, loading }),
+  docsview: dynamic(() => import("./docsview"), { ssr: false, loading }),
+  pkgmgr: dynamic(() => import("./pkgmgr"), { ssr: false, loading }),
   settings: dynamic(() => import("./settings"), { ssr: false, loading }),
 };
 

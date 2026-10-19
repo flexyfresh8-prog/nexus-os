@@ -104,6 +104,11 @@ export default function TerminalPanel({
     try {
       const res = await runCommand(trimmed, {
         cwdId: effectiveCwd,
+        env: "shell",
+        line: trimmed,
+        setEnv: () => {
+          push([{ text: "environment switching is available in the full Terminal app", dim: true }]);
+        },
         setCwd: (id) => setCwdId(id),
         clearScreen: () => setLines([]),
         openApp: (appId, props) => {

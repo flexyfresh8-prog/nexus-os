@@ -756,6 +756,146 @@ export const PROJECT_TEMPLATES: ProjectTemplate[] = [
     description: "A structured README.md with checklists, tables and code fences.",
     files: [{ name: "README.md", content: NOTES_MD }],
   },
+
+  // ------------------------------------------------ Node.js (real runtime)
+
+  {
+    id: "node-script",
+    name: "Node.js Script",
+    description:
+      "A package.json + index.js meant for the Node runtime (Terminal `env webcontainer` → `node index.js`). Editing support ≠ execution support in the preview.",
+    files: [
+      {
+        name: "package.json",
+        content: L(
+          "{",
+          '  "name": "nexus-node-script",',
+          '  "version": "1.0.0",',
+          '  "type": "module",',
+          '  "scripts": {',
+          '    "start": "node index.js"',
+          "  }",
+          "}",
+          ""
+        ),
+      },
+      {
+        name: "index.js",
+        content: L(
+          "// Runs with real Node.js — open Terminal, run `env webcontainer`, then `node index.js`.",
+          "const values = [6, 7, -1, 42];",
+          "console.log('Hello from real Node.js', process.version);",
+          "console.log('sum:', values.reduce((a, b) => a + b, 0));",
+          "console.log('argv:', process.argv.slice(2));",
+          ""
+        ),
+      },
+    ],
+  },
+  {
+    id: "node-server",
+    name: "Node HTTP Server",
+    description:
+      "node:http server with a JSON + HTML route. Start it from the Servers panel (`npm run dev`) and open the printed URL in NEXUS Browser.",
+    files: [
+      {
+        name: "package.json",
+        content: L(
+          "{",
+          '  "name": "nexus-node-server",',
+          '  "version": "1.0.0",',
+          '  "type": "module",',
+          '  "scripts": {',
+          '    "dev": "node server.js",',
+          '    "start": "node server.js"',
+          "  }",
+          "}",
+          ""
+        ),
+      },
+      {
+        name: "server.js",
+        content: L(
+          "import { createServer } from 'node:http';",
+          "",
+          "const PORT = 3000;",
+          "let hits = 0;",
+          "",
+          "const server = createServer((req, res) => {",
+          "  hits += 1;",
+          "  if (req.url.startsWith('/api')) {",
+          "    res.writeHead(200, { 'content-type': 'application/json' });",
+          "    res.end(JSON.stringify({ ok: true, hits, path: req.url, uptime: process.uptime() }));",
+          "    return;",
+          "  }",
+          "  res.writeHead(200, { 'content-type': 'text/html' });",
+          "  res.end(`<!DOCTYPE html><html><head><style>",
+          "    body{background:#0b0d12;color:#e8ecf3;font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0}",
+          "    .card{padding:2.5rem 3rem;border-radius:16px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);text-align:center}",
+          "    a{color:#22d3ee}",
+          "  </style></head><body><main class=card>",
+          "    <h1>Node server is alive</h1>",
+          "    <p>Served by node:http inside the browser runtime.</p>",
+          "    <p>Requests: <b>${hits}</b> · try <a href='/api/hello'>/api/hello</a></p>",
+          "  </main></body></html>`);",
+          "});",
+          "",
+          "server.listen(PORT, () => {",
+          "  console.log(`Server listening on http://localhost:${PORT}`);",
+          "});",
+          ""
+        ),
+      },
+    ],
+  },
+  {
+    id: "express-app",
+    name: "Express App",
+    description:
+      "Express with a router and an API endpoint. Run `npm install` (real dependency install), then `npm run dev` from the Servers panel.",
+    files: [
+      {
+        name: "package.json",
+        content: L(
+          "{",
+          '  "name": "nexus-express-app",',
+          '  "version": "1.0.0",',
+          '  "type": "module",',
+          '  "dependencies": {',
+          '    "express": "^4.19.2"',
+          "  },",
+          '  "scripts": {',
+          '    "dev": "node app.js",',
+          '    "start": "node app.js"',
+          "  }",
+          "}",
+          ""
+        ),
+      },
+      {
+        name: "app.js",
+        content: L(
+          "import express from 'express';",
+          "",
+          "const app = express();",
+          "const PORT = 3000;",
+          "",
+          "app.get('/', (req, res) => {",
+          "  res.type('html').send(`<!DOCTYPE html><html><body style='font-family:system-ui;background:#0b0d12;color:#e8ecf3;display:grid;place-items:center;min-height:100vh'>",
+          "    <div style='text-align:center'><h1>Express on NEXUS</h1><p>Visit <a style='color:#22d3ee' href='/api/time'>/api/time</a></p></div>",
+          "  </body></html>`);",
+          "});",
+          "",
+          "app.get('/api/time', (req, res) => {",
+          "  res.json({ now: new Date().toISOString(), runtime: 'express inside WebContainer' });",
+          "});",
+          "",
+          "app.listen(PORT, () => console.log(`Express listening on http://localhost:${PORT}`));",
+          ""
+        ),
+      },
+    ],
+  },
 ];
 
 export function templateById(id: string): ProjectTemplate | undefined {
