@@ -7,7 +7,7 @@
 
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNs } from "monaco-editor";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -55,7 +55,7 @@ import { useOS } from "../../store/os";
 import { useSettings } from "../../store/settings";
 import { PROJECT_TEMPLATES, templateById } from "./templates";
 import FileTree, { fileIcon } from "./FileTree";
-import PreviewPane, { buildPreviewDoc, isRuntimePayload, type PreviewFile } from "./PreviewPane";
+import PreviewPane, { buildPreviewDoc, type PreviewFile } from "./PreviewPane";
 import TerminalPanel from "./TerminalPanel";
 import { GitPanel } from "./GitPanel";
 import { ServersPanel } from "./ServersPanel";
@@ -1092,19 +1092,14 @@ export default function StudioApp({ windowId, launchProps, setTitle }: AppInstan
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // runtime errors reported by the sandboxed preview (this window's instance)
-  useEffect(() => {
-    const onMessage = (e: MessageEvent): void => {
-      if (!isRuntimePayload(e.data) || e.data.kind !== "error") return;
-      if (e.data.id !== windowId) return;
-      const message = e.data.message;
-      if (!message) return;
-      const line = typeof e.data.line === "number" ? e.data.line : undefined;
+  // preview errors are forwarded by PreviewPane itself (source-validated
+  // against the pane's own iframe — no other frame can spoof them)
+  const onPreviewError = useCallback(
+    (message: string, line?: number) => {
       setProblems((prev) => [...prev, { id: uid(), message, line }].slice(-100));
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [windowId]);
+    },
+    []
+  );
 
   // window title follows the active file / project
   useEffect(() => {
@@ -1462,6 +1457,7 @@ export default function StudioApp({ windowId, launchProps, setTitle }: AppInstan
           <div className="w-[38%] min-w-[240px] shrink-0 border-l border-[var(--nx-border)] bg-[#0d1017]">
             <PreviewPane
               doc={previewDoc}
+              onError={onPreviewError}
               onRefresh={() => refreshPreviewNow()}
               onClose={() => setPreviewOpen(false)}
             />

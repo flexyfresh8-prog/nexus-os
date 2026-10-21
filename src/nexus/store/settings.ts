@@ -19,6 +19,8 @@ export interface SettingsState {
   desktopIcons: DesktopIcon[];
   recentFiles: string[];
   bookmarks: Bookmark[];
+  /** idle minutes before the lock screen engages (0 = off) */
+  autoLockMin: number;
   set: (patch: Partial<Omit<SettingsState, "set" | "rehydrateDefaults">>) => void;
   addRecent: (fileId: string) => void;
   addBookmark: (title: string, url: string) => void;
@@ -50,6 +52,7 @@ export const useSettings = create<SettingsState>()(
       desktopIcons: DEFAULT_ICONS,
       recentFiles: [],
       bookmarks: [],
+      autoLockMin: 15,
 
       set: (patch) => set(patch),
 
@@ -96,6 +99,7 @@ export const useSettings = create<SettingsState>()(
           desktopIcons: DEFAULT_ICONS,
           recentFiles: [],
           bookmarks: [],
+          autoLockMin: 15,
         });
       },
     }),
@@ -114,6 +118,7 @@ export const useSettings = create<SettingsState>()(
         desktopIcons: s.desktopIcons,
         recentFiles: s.recentFiles,
         bookmarks: s.bookmarks,
+        autoLockMin: s.autoLockMin,
       }),
     }
   )

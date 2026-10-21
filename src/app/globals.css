@@ -236,6 +236,16 @@ body {
 @keyframes nx-spin {
   to { transform: rotate(360deg); }
 }
+@keyframes nx-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-9px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(3px); }
+}
+.nx-shake {
+  animation: nx-shake 0.4s ease;
+}
 
 .nx-win-open {
   animation: nx-win-open 0.18s cubic-bezier(0.22, 1, 0.36, 1);

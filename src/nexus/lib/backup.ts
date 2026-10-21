@@ -3,6 +3,8 @@
 // NEXUS OS — full backup export/import (fs + kv), safe validation
 
 import { STORE_FS, STORE_KV, idbGetAll, idbClear, idbPut } from "./idb";
+import { sanitizeImportedFS } from "./secure";
+import { audit } from "./secure";
 import type { FSNode } from "../types";
 
 export const BACKUP_VERSION = 1;
@@ -65,6 +67,7 @@ export async function collectBackup(): Promise<BackupFile> {
 
 export function downloadBackup(): Promise<void> {
   return collectBackup().then((backup) => {
+    audit("backup:export", `${backup.fs.length} nodes exported (secrets excluded)`);
     const json = JSON.stringify(backup, (k, v) => {
       if (v instanceof ArrayBuffer) return { __b64: bufToBase64(v) };
       return v;
@@ -102,15 +105,18 @@ export async function importBackup(json: string, mode: "merge" | "replace"): Pro
     return { ok: false, message: `Backup version ${String(b.version)} is newer than this system supports (${BACKUP_VERSION}).` };
   }
 
-  // validate + restore nodes
-  const nodes: FSNode[] = [];
-  for (const raw of b.fs) {
-    if (!raw || typeof raw.id !== "string" || typeof raw.name !== "string" || (raw.type !== "file" && raw.type !== "dir")) {
-      return { ok: false, message: "Backup contains invalid filesystem entries — import aborted." };
-    }
-    nodes.push(restore(raw as unknown as Record<string, unknown>));
+  // structural validation: caps, name rules, prototype-pollution keys,
+  // phantom files — before a single byte touches IndexedDB
+  const report = sanitizeImportedFS(
+    b.fs.map((n) => restore(n as unknown as Record<string, unknown>))
+  );
+  if (report.reason && report.nodes.length === 0) {
+    audit("backup:import", `rejected: ${report.reason}`);
+    return { ok: false, message: `Import rejected: ${report.reason}` };
   }
-  if (!nodes.some((n) => n.id === "root")) {
+  const nodes = report.nodes;
+  if (!nodes.some((n) => n.id === "root" && n.type === "dir")) {
+    audit("backup:import", "rejected: missing filesystem root");
     return { ok: false, message: "Backup is missing the filesystem root — import aborted." };
   }
 
@@ -122,6 +128,9 @@ export async function importBackup(json: string, mode: "merge" | "replace"): Pro
     if (Array.isArray(b.kv)) {
       for (const row of b.kv) {
         if (row && typeof row.key === "string" && mode === "merge") {
+          // never import secret entries (they are device-key-encrypted and
+          // useless across installs) or anything that is not a plain record
+          if (row.key.startsWith("secret:")) continue;
           const existing = await idbGetAll<{ key: string }>(STORE_KV);
           if (!existing.some((e) => e.key === row.key)) {
             await idbPut(STORE_KV, row);
@@ -129,7 +138,8 @@ export async function importBackup(json: string, mode: "merge" | "replace"): Pro
         }
       }
     }
-    return { ok: true, message: `Imported ${nodes.length} items (${mode} mode).`, files: nodes.length };
+    audit("backup:import", `${nodes.length} nodes, ${mode} mode${report.rejected ? `, ${report.rejected} dropped` : ""}`);
+    return { ok: true, message: `Imported ${nodes.length} items (${mode} mode).${report.rejected ? ` ${report.rejected} invalid entries dropped.` : ""}`, files: nodes.length };
   } catch (e) {
     return { ok: false, message: `Import failed: ${e instanceof Error ? e.message : String(e)}` };
   }

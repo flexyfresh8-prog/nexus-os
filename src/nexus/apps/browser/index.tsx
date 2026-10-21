@@ -32,6 +32,7 @@ import { useOS } from "../../store/os";
 import { useSettings } from "../../store/settings";
 import HomePage from "./HomePage";
 import { HOME_ENTRY, isKnownBlocked, resolveInput, resolveLaunchUrl, safeHostname } from "./lib";
+import { isSelfOriginUrl, safeExternalOpen, audit } from "../../lib/secure";
 
 interface HistoryState {
   /** Visited targets in order; HOME_ENTRY marks the internal home page. */
@@ -219,6 +220,18 @@ export default function BrowserApp({ launchProps, setTitle }: AppInstanceProps) 
         goHome();
         return;
       }
+      // Never embed this app's own origin: with allow-same-origin in the
+      // sandbox, a same-origin frame would be a full sandbox escape. There
+      // is nothing useful to browse here anyway.
+      if (isSelfOriginUrl(resolved)) {
+        audit("csp:violation", "browser blocked same-origin embed (self-frame escape)");
+        notify({
+          title: "Browser",
+          body: "This address points at NEXUS OS itself and is blocked for security. Nothing to browse here.",
+          appId: "browser",
+        });
+        return;
+      }
       setInput(resolved);
       setLoading(true);
       if (history.entries[history.idx] === resolved) {
@@ -227,7 +240,7 @@ export default function BrowserApp({ launchProps, setTitle }: AppInstanceProps) 
       }
       pushEntry(resolved);
     },
-    [goHome, history, pushEntry]
+    [goHome, history, notify, pushEntry]
   );
 
   const goToIndex = useCallback(
@@ -264,7 +277,13 @@ export default function BrowserApp({ launchProps, setTitle }: AppInstanceProps) 
       });
       return;
     }
-    window.open(current, "_blank", "noopener,noreferrer");
+    if (!safeExternalOpen(current)) {
+      notify({
+        title: "Browser",
+        body: "Could not open that URL in a new tab — only http(s) addresses are allowed.",
+        appId: "browser",
+      });
+    }
   }, [atHome, current, notify]);
 
   const toggleBookmark = useCallback(() => {

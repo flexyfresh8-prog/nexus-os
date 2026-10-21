@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- NEXUS OS preview shell.
+     Loaded INSIDE a sandboxed iframe (sandbox="allow-scripts allow-forms
+     allow-modals allow-popups" — deliberately WITHOUT allow-same-origin), so
+     this document runs with an opaque origin and cannot touch the parent
+     app's DOM, storage, or cookies.
+
+     Why a real file instead of srcDoc: a strict Content-Security-Policy on
+     the parent document is INHERITED by srcdoc documents, which would block
+     every inline <script> in user preview code. A network-fetched document
+     takes its policy container from its own HTTP response — and this static
+     file is served without a CSP header — so user preview code keeps working
+     while the main app stays locked down.
+
+     Protocol (all messages validated against e.source by the parent):
+       shell → parent : { source: "nexus-preview-shell", kind: "ready" }
+       parent → shell : { __nexusPreview: true, id: string, html: string }
+       shell → parent : { source: "nexus-preview-shell", kind: "wrote" | "error", ... }
+       preview code   : { source: "nexus-preview", ... } (injected runtime) -->
+<title>NEXUS preview</title>
+</head>
+<body>
+<script>
+(function () {
+  "use strict";
+  function post(kind, extra) {
+    try {
+      parent.postMessage(Object.assign({ source: "nexus-preview-shell", kind: kind }, extra || {}), "*");
+    } catch (e) { /* parent gone */ }
+  }
+
+  window.addEventListener("message", function (e) {
+    // We accept documents from ANY ancestor (this frame is sandboxed and
+    // serves user content only — it confers no privilege). Shape-validate
+    // strictly before touching the DOM.
+    var d = e.data;
+    if (!d || d.__nexusPreview !== true) return;
+    if (typeof d.html !== "string" || d.html.length > 5 * 1024 * 1024) {
+      post("error", { message: "preview payload rejected (missing or oversized)" });
+      return;
+    }
+    if (iv) { clearInterval(iv); iv = null; } // stop re-announcing once live
+    try {
+      document.open();
+      document.write(d.html);
+      document.close();
+      post("wrote", { id: typeof d.id === "string" ? d.id : undefined });
+    } catch (err) {
+      post("error", { message: "preview render failed: " + String(err) });
+    }
+  });
+
+  post("ready");
+  // Resilience: the parent attaches its listener in a React effect that can
+  // race an instant (cached) iframe load — re-announce readiness briefly.
+  // The parent treats `ready` idempotently (it just re-sends the current doc).
+  var announces = 0;
+  var iv = setInterval(function () {
+    if (++announces > 6) { clearInterval(iv); iv = null; return; }
+    post("ready");
+  }, 250);
+})();
+</script>
+</body>
+</html>

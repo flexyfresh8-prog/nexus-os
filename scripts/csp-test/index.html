@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self'; frame-src 'self' blob:;">
+<title>CSP inheritance test</title>
+</head>
+<body>
+<h1>CSP test host</h1>
+<pre id="results">running…</pre>
+<script>
+window.__MAIN_OK = true;
+</script>
+<script src="app.js"></script>
+<iframe id="f-srcdoc" style="width:200px;height:40px"></iframe>
+<iframe id="f-sw" style="width:200px;height:40px"></iframe>
+</body>
+</html>

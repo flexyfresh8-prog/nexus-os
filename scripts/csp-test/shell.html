@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!-- NOTE: no CSP meta here — this file is served as a plain static asset.
+     When loaded inside a sandboxed iframe, its policy container comes from
+     the HTTP response (no CSP header -> no CSP). -->
+<title>preview shell</title>
+</head>
+<body>
+<script>
+(function () {
+  // parent sends { __nexusPreview: true, id, html }; we render it.
+  window.addEventListener('message', function (e) {
+    var d = e.data || {};
+    if (!d || d.__nexusPreview !== true) return;
+    if (typeof d.id !== 'string' || typeof d.html !== 'string') return;
+    try {
+      // open the document stream and write the user document
+      document.open();
+      document.write(d.html);
+      document.close();
+      // window survives document.open() — report from here
+      parent.postMessage({ source: 'nexus-preview-shell', kind: 'wrote' }, '*');
+    } catch (err) {
+      parent.postMessage({ source: 'nexus-preview-shell', kind: 'error', message: String(err) }, '*');
+    }
+  });
+  parent.postMessage({ source: 'nexus-preview-shell', kind: 'ready' }, '*');
+})();
+</script>
+</body>
+</html>

@@ -2,14 +2,27 @@
 
 // NEXUS OS — Studio live preview pane.
 //
-// The preview document is assembled from the project's own files: index.html
-// with local <link>/<script> references inlined. It is delivered to the iframe
-// via the srcDoc prop — user content by design, which is exactly why the iframe
-// is sandboxed WITHOUT allow-same-origin: previewed code must not be able to
-// touch the parent app's DOM, localStorage, IndexedDB or cookies. It also never
-// touches the app DOM itself (no innerHTML) — the browser sandbox renders it.
+// Security architecture (verified empirically — see SECURITY.md):
+//
+//   1. The preview document is assembled from the project's own files
+//      (index.html with local <link>/<script> references inlined). It is
+//      USER code by design.
+//
+//   2. It is delivered to `preview-shell.html` — a static, CSP-free shell
+//      page — inside an iframe sandboxed WITHOUT allow-same-origin. The
+//      rendered document therefore has an opaque origin: it cannot touch
+//      the parent app's DOM, localStorage, IndexedDB, cookies, or windows.
+//
+//   3. Why not srcDoc? A parent CSP is inherited by srcdoc documents and
+//      would block every inline <script> in user preview code. A real
+//      network response carries its own (empty) policy instead — strict CSP
+//      on the app, free execution inside the sealed sandbox.
+//
+//   4. Every postMessage from the frame is validated against
+//      `e.source === iframe.contentWindow` AND its payload shape — nothing
+//      else in the page can spoof preview errors.
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw, X } from "lucide-react";
 
 export interface PreviewFile {
@@ -152,15 +165,82 @@ export function isRuntimePayload(data: unknown): data is RuntimePayload {
 // ---------------------------------------------------------------- component
 
 interface PreviewPaneProps {
-  /** stable srcDoc — only changes when a refresh actually happened */
+  /** stable doc — only changes when a refresh actually happened */
   doc: string | null;
+  /** forwarded validated preview errors (already bound to this window id) */
+  onError?: (message: string, line?: number, col?: number) => void;
   onRefresh: () => void;
   onClose: () => void;
 }
 
-export default function PreviewPane({ doc, onRefresh, onClose }: PreviewPaneProps) {
-  const [loadedDoc, setLoadedDoc] = useState<string | null>(null);
-  const loaded = doc !== null && loadedDoc === doc;
+/** URL of the static shell page, correct under any basePath. */
+function shellUrl(): string {
+  try {
+    return new URL("preview-shell.html", document.baseURI).toString();
+  } catch {
+    return "/preview-shell.html";
+  }
+}
+
+export default function PreviewPane({ doc, onError, onRefresh, onClose }: PreviewPaneProps) {
+  const [ready, setReady] = useState(false); // shell signalled ready
+  const [rendered, setRendered] = useState(false); // current doc written
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const docRef = useRef<string | null>(null);
+  const sentRef = useRef<string | null>(null);
+  const shell = useRef<string>(shellUrl());
+
+  const send = useCallback((html: string) => {
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return;
+    sentRef.current = html;
+    win.postMessage({ __nexusPreview: true, id: "", html }, "*");
+  }, []);
+
+  // handshake: only THIS pane's frame can talk to us. Every message is
+  // double-checked against e.source and the payload shape.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
+      const d = e.data as { source?: string; kind?: string } | null;
+      if (!d || typeof d !== "object") return;
+
+      if (d.source === "nexus-preview-shell") {
+        if (d.kind === "ready") {
+          setReady(true);
+          // re-announced ready → resend only if this exact doc never arrived
+          if (docRef.current && docRef.current !== sentRef.current) {
+            send(docRef.current);
+          }
+        } else if (d.kind === "wrote") {
+          setRendered(true);
+        } else if (d.kind === "error") {
+          onError?.(String((d as { message?: unknown }).message ?? "preview shell error"));
+        }
+        return;
+      }
+
+      if (isRuntimePayload(d) && d.kind === "error") {
+        if (d.message) onError?.(d.message, d.line, d.col);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [onError, send]);
+
+  // doc changed → remember it; send immediately when the shell is already ready
+  // (sentRef guard prevents double-write when both this effect and the
+  // handshake listener react to the same state change)
+  useEffect(() => {
+    docRef.current = doc;
+    if (doc !== sentRef.current) setRendered(false);
+    if (ready && doc && doc !== sentRef.current) send(doc);
+  }, [doc, ready, send]);
+
+  // NOTE: no setRendered(false) on iframe load — the shell's load event can
+  // legitimately fire after the doc was already written and would clobber
+  // the "rendered" state, wedging the loading indicator on. Doc changes
+  // already reset it in the effect above.
 
   return (
     <div className="flex h-full min-w-0 flex-col">
@@ -168,7 +248,7 @@ export default function PreviewPane({ doc, onRefresh, onClose }: PreviewPaneProp
         <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--nx-text-dim)]">
           Preview
         </span>
-        {!loaded && doc !== null && (
+        {!rendered && doc !== null && (
           <span className="text-[10px] text-[var(--nx-text-dim)]">loading…</span>
         )}
         <div className="ml-auto flex items-center gap-0.5">
@@ -200,16 +280,18 @@ export default function PreviewPane({ doc, onRefresh, onClose }: PreviewPaneProp
           </div>
         ) : (
           <>
-            {/* sandbox intentionally omits allow-same-origin: user preview code
+            {/* sandbox intentionally omits allow-same-origin: previewed code
                 must stay sealed off from the parent app's storage and DOM */}
             <iframe
+              ref={iframeRef}
               title="Live preview"
               sandbox="allow-scripts allow-forms allow-modals allow-popups"
-              srcDoc={doc}
+              src={shell.current}
+              referrerPolicy="no-referrer"
               className="h-full w-full border-0 bg-white"
-              onLoad={() => setLoadedDoc(doc)}
+              onLoad={() => { /* shell handshake handled via postMessage */ }}
             />
-            {!loaded && (
+            {!rendered && (
               <div className="pointer-events-none absolute inset-0 grid place-items-center bg-[#0d1017]/70">
                 <div className="h-5 w-5 rounded-full border-2 border-[rgba(var(--nx-accent-rgb),0.25)] border-t-[var(--nx-accent)] nx-spin" />
               </div>

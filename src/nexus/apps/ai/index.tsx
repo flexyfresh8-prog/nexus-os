@@ -30,7 +30,8 @@ import {
   X,
 } from "lucide-react";
 import type { AppInstanceProps } from "../../types";
-import { kvGet, kvSet } from "../../lib/idb";
+import { kvGet, kvSet, idbDelete, STORE_KV } from "../../lib/idb";
+import { sealKV, openKV, deleteKV, audit } from "../../lib/secure";
 import { uid } from "../../lib/utils";
 import {
   DEFAULT_BASE_URLS,
@@ -54,6 +55,9 @@ import type {
 import { clearTasks, loadTasks, saveTask } from "./history";
 
 const PROVIDER_KEY = "ai:provider";
+// encrypted-at-rest location (sealed with the per-installation device key);
+// the legacy plaintext key above is only read once for migration, then removed.
+const PROVIDER_SECRET_KEY = "secret:ai:provider";
 const MAX_STEPS = 12;
 const MAX_TRANSCRIPT = 40;
 
@@ -614,9 +618,10 @@ function ConfigScreen({
             </p>
           ) : (
             <p className="text-xs leading-relaxed text-[var(--nx-text-dim)]">
-              Bring your own key. The key is stored locally in IndexedDB on this device and is
-              sent ONLY to the provider endpoint you configure. BYOK calls go straight from the
-              browser, so choose providers that allow browser CORS calls.
+              Bring your own key. It is stored <b>encrypted (AES-GCM) at rest</b> in this
+              browser&apos;s IndexedDB — never in backups or exports — and is sent ONLY to the
+              provider endpoint you configure. BYOK calls go straight from the browser, so
+              choose providers that allow browser CORS calls.
             </p>
           )}
           {form.type === "anthropic" && (
@@ -785,7 +790,18 @@ export default function AIApp(_props: AppInstanceProps) {
     let alive = true;
     void (async () => {
       try {
-        const raw = await kvGet<unknown>(PROVIDER_KEY);
+        // encrypted-at-rest first; migrate legacy plaintext if present
+        let raw: unknown = await openKV<unknown>(PROVIDER_SECRET_KEY);
+        if (raw === null) {
+          const legacy = await kvGet<unknown>(PROVIDER_KEY);
+          if (legacy && typeof legacy === "object") {
+            raw = legacy;
+            void sealKV(PROVIDER_SECRET_KEY, "ai-provider", legacy)
+              .then(() => idbDelete(STORE_KV, PROVIDER_KEY))
+              .catch(() => {});
+            audit("ai:provider-saved", "migrated legacy plaintext config to encrypted storage");
+          }
+        }
         const parsed = parseConfig(raw);
         if (!alive) return;
         if (parsed) {
@@ -1115,7 +1131,8 @@ export default function AIApp(_props: AppInstanceProps) {
     }
     void (async () => {
       try {
-        await kvSet(PROVIDER_KEY, clean);
+        await sealKV(PROVIDER_SECRET_KEY, "ai-provider", clean);
+        audit("ai:provider-saved", `provider=${clean.type}, key stored encrypted at rest`);
         cfgRef.current = clean;
         setCfg(clean);
         setView("chat");

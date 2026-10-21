@@ -3,9 +3,10 @@
 // NEXUS OS — dock: launchers, running indicators, tray (clock/notifications/settings)
 
 import React, { useEffect, useRef, useState } from "react";
-import { Bell, Search, Settings as SettingsIcon } from "lucide-react";
+import { Bell, Search, Settings as SettingsIcon, Lock } from "lucide-react";
 import { useOS } from "../store/os";
 import { useSettings } from "../store/settings";
+import { useLock } from "../store/lock";
 import { DOCK_ORDER, APP_META } from "../apps/meta";
 import { AppIcon } from "../apps/AppIcon";
 
@@ -163,6 +164,14 @@ export function Dock() {
           onClick={() => launch("settings")}
         >
           <SettingsIcon size={18} />
+        </button>
+        <button
+          aria-label="Lock screen (Ctrl+Alt+L)"
+          title="Lock (Ctrl+Alt+L)"
+          className="hidden h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--nx-text-dim)] transition hover:bg-white/10 hover:text-[var(--nx-text)] sm:grid"
+          onClick={() => useLock.getState().lock("manual")}
+        >
+          <Lock size={17} />
         </button>
       </div>
     </div>

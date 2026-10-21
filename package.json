@@ -5,14 +5,10 @@
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "build:pages": "sed -i.bak 's/export const dynamic = \"force-dynamic\";/export const dynamic = \"force-static\";/' src/app/api/ai/chat/route.ts && DEPLOY_TARGET=gh-pages GH_REPO_NAME=nexus-os next build; mv src/app/api/ai/chat/route.ts.bak src/app/api/ai/chat/route.ts",
+    "build:pages": "sed -i.bak 's/export const dynamic = \"force-dynamic\";/export const dynamic = \"force-static\";/' src/app/api/ai/chat/route.ts && DEPLOY_TARGET=gh-pages GH_REPO_NAME=nexus-os next build; mv src/app/api/ai/chat/route.ts.bak src/app/api/ai/chat/route.ts; node scripts/gen-csp.mjs out",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
-    "test": "bun test src/nexus",
-    "db:push": "prisma db push --accept-data-loss",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "test": "bun test src/nexus"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -21,7 +17,6 @@
     "@hookform/resolvers": "^5.1.1",
     "@mdxeditor/editor": "^3.39.1",
     "@monaco-editor/react": "^4.7.0",
-    "@prisma/client": "^6.11.1",
     "@radix-ui/react-accordion": "^1.2.11",
     "@radix-ui/react-alert-dialog": "^1.1.14",
     "@radix-ui/react-aspect-ratio": "^1.1.7",
@@ -63,11 +58,9 @@
     "isomorphic-git": "^1.44.3",
     "jszip": "^3.10.2",
     "lucide-react": "^0.525.0",
-    "next": "^16.1.1",
-    "next-auth": "^4.24.11",
+    "next": "^16.4.2",
     "next-intl": "^4.3.4",
     "next-themes": "^0.4.6",
-    "prisma": "^6.11.1",
     "react": "^19.0.0",
     "react-day-picker": "^9.8.0",
     "react-dom": "^19.0.0",
@@ -76,11 +69,10 @@
     "react-resizable-panels": "^3.0.3",
     "react-syntax-highlighter": "^15.6.1",
     "recharts": "^2.15.4",
-    "sharp": "^0.34.3",
+    "sharp": "^0.35.5",
     "sonner": "^2.0.6",
     "tailwind-merge": "^3.3.1",
     "tailwindcss-animate": "^1.0.7",
-    "uuid": "^11.1.0",
     "vaul": "^1.1.2",
     "z-ai-web-dev-sdk": "^0.0.18",
     "zod": "^4.0.2",
@@ -96,5 +88,12 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
+  },
+  "overrides": {
+    "lodash": "^4.17.21",
+    "lodash-es": "^4.17.21",
+    "source-map-js": "^1.2.2",
+    "js-yaml": "^4.3.2",
+    "postcss": "^8.5.31"
   }
 }

@@ -6,7 +6,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   Palette, Monitor, Gauge, Keyboard, HardDrive, Info, Upload, Download,
-  RotateCcw, Trash2, Check, X, ShieldAlert, LayoutGrid, Play, Save,
+  RotateCcw, Trash2, Check, X, ShieldAlert, ShieldCheck, LayoutGrid, Play, Save, Lock,
 } from "lucide-react";
 import type { AppInstanceProps } from "../../types";
 import { useSettings } from "../../store/settings";
@@ -16,10 +16,12 @@ import { WALLPAPERS, ACCENTS } from "../../lib/wallpapers";
 import { formatBytes } from "../../lib/utils";
 import { downloadBackup, importBackup } from "../../lib/backup";
 import { idbCount, STORE_FS } from "../../lib/idb";
+import { useLock } from "../../store/lock";
+import { audit, auditLog, clearAudit, agoOf, cryptoAvailable, type AuditEntry } from "../../lib/secure";
 import { WORKSPACE_PRESETS, applyPreset, saveSession, loadSessions, restoreSession, deleteSession, type SavedSession } from "../../lib/workspaces";
 import { OS_VERSION } from "../meta";
 
-type SectionId = "appearance" | "desktop" | "workspaces" | "motion" | "shortcuts" | "storage" | "about";
+type SectionId = "appearance" | "desktop" | "workspaces" | "motion" | "shortcuts" | "security" | "storage" | "about";
 
 const SECTIONS: { id: SectionId; name: string; icon: React.ReactNode; hint: string }[] = [
   { id: "appearance", name: "Appearance", icon: <Palette size={15} />, hint: "Theme, accent, wallpaper" },
@@ -27,6 +29,7 @@ const SECTIONS: { id: SectionId; name: string; icon: React.ReactNode; hint: stri
   { id: "workspaces", name: "Workspaces", icon: <LayoutGrid size={15} />, hint: "Presets, saved sessions" },
   { id: "motion", name: "Motion", icon: <Gauge size={15} />, hint: "Animations" },
   { id: "shortcuts", name: "Shortcuts", icon: <Keyboard size={15} />, hint: "Keyboard reference" },
+  { id: "security", name: "Security", icon: <ShieldCheck size={15} />, hint: "Lock, secrets, audit log" },
   { id: "storage", name: "Storage & Backup", icon: <HardDrive size={15} />, hint: "Usage, backup, reset" },
   { id: "about", name: "About", icon: <Info size={15} />, hint: "Version, capabilities" },
 ];
@@ -43,6 +46,7 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Drag to screen edges", action: "Snap zones (halves, quarters, full)" },
   { keys: "Ctrl / ⌘ + S (Studio)", action: "Save file" },
   { keys: "F2 / Delete (Files)", action: "Rename / delete selection" },
+  { keys: "Ctrl / ⌘ + Alt + L", action: "Lock the screen" },
   { keys: "Right-click / long-press", action: "Context menus everywhere" },
 ];
 
@@ -334,6 +338,8 @@ export default function SettingsApp({ launchProps, setTitle }: AppInstanceProps)
           </section>
         )}
 
+        {section === "security" && <SecuritySection />}
+
         {section === "storage" && (
           <section className="nx-fade-in">
             <h2 className="text-[15px] font-semibold text-[var(--nx-text)]">Storage & Backup</h2>
@@ -610,6 +616,272 @@ function WorkspacesSection() {
           ))
         )}
       </div>
+    </section>
+  );
+}
+
+/* ---------------- security section ---------------- */
+
+const AUTOLOCK_CHOICES = [
+  { v: 0, label: "Off" },
+  { v: 1, label: "1 min" },
+  { v: 5, label: "5 min" },
+  { v: 15, label: "15 min" },
+  { v: 60, label: "1 hour" },
+];
+
+function SecuritySection() {
+  const lock = useLock();
+  const autoLockMin = useSettings((s) => s.autoLockMin);
+  const setSettings = useSettings((st) => st.set);
+  const notify = useOS((st) => st.notify);
+
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [log, setLog] = useState<AuditEntry[]>([]);
+  const [wipePhrase, setWipePhrase] = useState("");
+  const [wiping, setWiping] = useState(false);
+
+  const refreshLog = () => void auditLog().then((l) => setLog([...l].reverse().slice(0, 40)));
+  useEffect(refreshLog, []);
+
+  const flash = (ok: boolean, text: string) => {
+    setMsg({ ok, text });
+    setTimeout(() => setMsg(null), 5000);
+  };
+
+  const enable = async () => {
+    setBusy(true);
+    const err = await lock.enable(next);
+    setBusy(false);
+    if (err) flash(false, err);
+    else {
+      flash(true, "Lock screen enabled. It engages on reload and via the dock button or Ctrl+Alt+L.");
+      setCurrent("");
+      setNext("");
+      refreshLog();
+    }
+  };
+
+  const change = async () => {
+    setBusy(true);
+    const err = await lock.change(current, next);
+    setBusy(false);
+    if (err) flash(false, err);
+    else {
+      flash(true, "Passcode changed. The new passcode takes effect immediately.");
+      setCurrent("");
+      setNext("");
+      refreshLog();
+    }
+  };
+
+  const disable = async () => {
+    setBusy(true);
+    const err = await lock.disable(current);
+    setBusy(false);
+    if (err) flash(false, err);
+    else {
+      flash(true, "Lock screen disabled.");
+      setCurrent("");
+      setNext("");
+      refreshLog();
+    }
+  };
+
+  const panicWipe = async () => {
+    if (wipePhrase !== "ERASE ALL") return;
+    setWiping(true);
+    audit("panic-wipe", "user-initiated secure wipe from Settings");
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister().catch(() => {})));
+      }
+      // IndexedDB last — then reload into a factory state
+      const dbs = typeof indexedDB.databases === "function" ? await indexedDB.databases() : [];
+      for (const db of dbs) {
+        if (db.name) await new Promise<void>((res) => {
+          const req = indexedDB.deleteDatabase(db.name!);
+          req.onsuccess = req.onerror = req.onblocked = () => res();
+        });
+      }
+    } catch {
+      /* wipe as much as possible regardless */
+    }
+    location.reload();
+  };
+
+  const cryptoOk = cryptoAvailable();
+
+  return (
+    <section className="nx-fade-in">
+      <h2 className="text-[15px] font-semibold text-[var(--nx-text)]">Security</h2>
+      <p className="mt-0.5 text-[12px] text-[var(--nx-text-dim)]">
+        Lock screen, secret storage and the security audit trail. Everything runs locally —
+        see SECURITY.md in the repository for the full threat model.
+      </p>
+
+      {/* posture */}
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {[
+          { ok: cryptoOk, label: "WebCrypto available", desc: "AES-GCM + PBKDF2 for secrets and the lock verifier" },
+          { ok: true, label: "AI provider keys encrypted at rest", desc: "sealed with a per-installation device key, excluded from backups" },
+          { ok: true, label: "Sandboxed execution", desc: "previews run in an opaque-origin iframe; user JS in a Web Worker" },
+          { ok: true, label: "Strict Content-Security-Policy", desc: "inline script injection is blocked; violations are audited" },
+        ].map((r) => (
+          <div key={r.label} className="flex items-start gap-2.5 rounded-xl border border-[var(--nx-border)] bg-white/[0.03] p-3">
+            <ShieldCheck size={15} className={`mt-0.5 shrink-0 ${r.ok ? "text-emerald-400" : "text-amber-400"}`} />
+            <div>
+              <div className="text-[12.5px] font-medium text-[var(--nx-text)]">{r.label}</div>
+              <div className="text-[11px] leading-snug text-[var(--nx-text-dim)]">{r.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* lock screen */}
+      <h3 className="mb-1 mt-6 text-[12px] font-semibold uppercase tracking-wide text-[var(--nx-text-dim)]">Lock screen</h3>
+      <Row
+        title={lock.hasLock ? "Passcode is enabled" : "No passcode is set"}
+        desc="A passcode gates the whole desktop with a lock screen. Verification uses PBKDF2 (600k rounds) + AES-GCM; the passcode itself is never stored."
+      >
+        <div className="flex items-center gap-2 text-[11px] text-[var(--nx-text-dim)]">
+          <Lock size={13} className={lock.hasLock ? "text-emerald-400" : ""} />
+          {lock.hasLock ? "On" : "Off"}
+        </div>
+      </Row>
+      <Row title="Auto-lock" desc="Engage the lock screen after this much idle time (pointer / keyboard / wheel).">
+        <select
+          value={autoLockMin}
+          onChange={(e) => setSettings({ autoLockMin: Number(e.target.value) })}
+          className="rounded-lg border border-[var(--nx-border)] bg-transparent px-2 py-1.5 text-xs text-[var(--nx-text)] outline-none"
+          aria-label="Auto-lock timeout"
+        >
+          {AUTOLOCK_CHOICES.map((c) => (
+            <option key={c.v} value={c.v}>{c.label}</option>
+          ))}
+        </select>
+      </Row>
+
+      <div className="mt-3 rounded-xl border border-[var(--nx-border)] bg-white/[0.03] p-3.5">
+        <div className="text-[12px] font-medium text-[var(--nx-text)]">
+          {lock.hasLock ? "Change or remove the passcode" : "Set a passcode"}
+        </div>
+        <div className="mt-2.5 grid gap-2">
+          {lock.hasLock && (
+            <input
+              type="password"
+              autoComplete="off"
+              value={current}
+              onChange={(e) => setCurrent(e.target.value)}
+              placeholder="Current passcode"
+              aria-label="Current passcode"
+              className="rounded-lg border border-[var(--nx-border)] bg-black/25 px-3 py-2 text-xs text-[var(--nx-text)] outline-none focus:border-[rgba(var(--nx-accent-rgb),0.5)]"
+            />
+          )}
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            placeholder={lock.hasLock ? "New passcode (min 4 chars)" : "New passcode (min 4 chars)"}
+            aria-label="New passcode"
+            className="rounded-lg border border-[var(--nx-border)] bg-black/25 px-3 py-2 text-xs text-[var(--nx-text)] outline-none focus:border-[rgba(var(--nx-accent-rgb),0.5)]"
+          />
+          <div className="flex flex-wrap gap-2">
+            <button
+              disabled={busy || !next}
+              onClick={() => void (lock.hasLock ? change() : enable())}
+              className="rounded-lg bg-[var(--nx-accent)] px-3.5 py-1.5 text-xs font-semibold text-black transition hover:brightness-110 disabled:opacity-40"
+            >
+              {lock.hasLock ? "Change passcode" : "Enable lock screen"}
+            </button>
+            {lock.hasLock && (
+              <button
+                disabled={busy || !current}
+                onClick={() => void disable()}
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-3.5 py-1.5 text-xs text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
+              >
+                Remove lock
+              </button>
+            )}
+          </div>
+          {msg && (
+            <p className={`text-[11.5px] ${msg.ok ? "text-emerald-400" : "text-rose-400"}`} role="status">
+              {msg.text}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* audit log */}
+      <h3 className="mb-2 mt-6 flex items-center justify-between text-[12px] font-semibold uppercase tracking-wide text-[var(--nx-text-dim)]">
+        <span>Security audit trail</span>
+        <button
+          onClick={() => { void clearAudit().then(refreshLog); }}
+          className="rounded-md px-2 py-1 text-[10px] normal-case text-[var(--nx-text-dim)] hover:bg-white/10 hover:text-[var(--nx-text)]"
+        >
+          Clear
+        </button>
+      </h3>
+      <div className="max-h-64 overflow-y-auto rounded-xl border border-[var(--nx-border)] bg-black/20 p-2.5 nx-scroll" aria-live="polite">
+        {log.length === 0 ? (
+          <div className="px-1 py-3 text-center text-[11.5px] text-[var(--nx-text-dim)]">No events recorded yet.</div>
+        ) : (
+          log.map((e, i) => (
+            <div key={`${e.ts}-${i}`} className="flex items-baseline gap-2 border-b border-white/5 py-1.5 text-[11.5px] last:border-0">
+              <span className="shrink-0 tabular-nums text-[var(--nx-text-dim)]">{agoOf(e.ts)}</span>
+              <span className={`shrink-0 font-mono ${e.event.includes("fail") || e.event.includes("violation") || e.event.includes("wipe") ? "text-amber-400" : "text-[var(--nx-accent)]"}`}>
+                {e.event}
+              </span>
+              {e.detail && <span className="min-w-0 truncate text-[var(--nx-text-dim)]">{e.detail}</span>}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* panic wipe */}
+      <h3 className="mb-1 mt-6 text-[12px] font-semibold uppercase tracking-wide text-[var(--nx-text-dim)]">Panic wipe</h3>
+      <div className="rounded-xl border border-red-500/30 bg-red-500/[0.06] p-3.5">
+        <p className="text-[11.5px] leading-relaxed text-[var(--nx-text-dim)]">
+          Immediately erases <b className="text-red-300">everything</b> this app stores — files, settings,
+          encrypted secrets, audit trail, caches — and reloads. There is no confirmation dialog beyond
+          typing the phrase; there is no undo. Browsers may still keep residual copies in their storage
+          engine internals until the profile itself is cleared.
+        </p>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <input
+            value={wipePhrase}
+            onChange={(e) => setWipePhrase(e.target.value)}
+            placeholder='Type "ERASE ALL"'
+            aria-label="Panic wipe confirmation phrase"
+            className="w-44 rounded-lg border border-red-500/40 bg-black/30 px-3 py-2 font-mono text-xs text-red-200 outline-none focus:border-red-400"
+          />
+          <button
+            disabled={wiping || wipePhrase !== "ERASE ALL"}
+            onClick={() => void panicWipe()}
+            className="rounded-lg bg-red-500 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-red-400 disabled:opacity-40"
+          >
+            {wiping ? "Erasing…" : "Erase everything"}
+          </button>
+        </div>
+      </div>
+
+      <p className="mt-4 text-[11px] leading-relaxed text-[var(--nx-text-dim)]">
+        Honest limits: a browser app cannot protect data from the person using the device while the
+        desktop is unlocked, and it cannot make storage survive a browser profile wipe. What this
+        layer does: gate the UI, encrypt secrets at rest, sandbox all executed/previewed code,
+        enforce a strict CSP and record who did what in the audit trail.
+      </p>
     </section>
   );
 }

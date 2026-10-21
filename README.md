@@ -49,7 +49,7 @@ When the Node runtime isn't available, NEXUS says so honestly and everything els
 - **Persistence** — IndexedDB with versioned schema + migration hook; settings/session/notifications survive reloads; corrupt imports rejected safely; full backup export/import.
 - **Recovery** — per-window error boundaries (a crashed app never takes down the desktop), global boundary over the shell.
 - **Design** — near-black workspace, translucent charcoal glass, restrained depth, reduced-motion support, consistent type/icon system.
-- **Security** — VFS path validation (no escaping the root), no `eval`/`Function` in the shell path, sandboxed previews, tool-call allowlist validation, approval gates for destructive actions, AI credentials server-side for the backend provider.
+- **Security** — strict Content-Security-Policy in both deployment modes (build-time script hashes on static hosting, per-request nonce + `strict-dynamic` on server hosting), a lock screen with PBKDF2/AES-GCM verification and idle auto-lock, AI provider keys encrypted at rest, sandboxed opaque-origin previews, tool-call allowlist validation, approval gates for destructive actions, prototype-pollution-proof backup imports, a security audit trail, and per-IP rate limiting on the AI backend. Full model + honest limits in **[SECURITY.md](./SECURITY.md)**.
 
 ## Honest capability boundaries
 

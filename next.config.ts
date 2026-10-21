@@ -18,20 +18,25 @@ const nextConfig: NextConfig = isPages
       output: "standalone",
       typescript: { ignoreBuildErrors: true },
       reactStrictMode: false,
-      // Cross-origin isolation: required by the Node runtime (WebContainers).
-      // credentialless (not require-corp) so the Monaco CDN and external
-      // iframe previews keep loading without CORP headers.
       async headers() {
         return [
           {
-            source: "/(.*)",
+            // Under COEP (set by middleware on the app), an embedded document
+            // without its own COEP header fails the embedding check — the
+            // preview shell would render as an empty frame. It still gets NO
+            // CSP/XFO (see src/middleware.ts): a plain network response keeps
+            // its policy container empty so sandboxed user code can run.
+            source: "/preview-shell.html",
             headers: [
-              { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
               { key: "Cross-Origin-Embedder-Policy", value: "credentialless" },
             ],
           },
         ];
       },
+      // COOP/COEP for the app shell + the production CSP come from
+      // src/middleware.ts, so dev mode can keep HMR eval while production
+      // stays locked down. Headers are not duplicated for "/": double COEP
+      // headers break cross-origin isolation.
     };
 
 export default nextConfig;

@@ -12,6 +12,7 @@
 // prose; if its JSON is malformed, the raw text is returned verbatim.
 
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -22,6 +23,70 @@ export const maxDuration = 120;
 // "unavailable" GET so the client falls back to BYOK providers.
 const IS_STATIC_EXPORT = process.env.DEPLOY_TARGET === "gh-pages";
 export const dynamic = "force-dynamic";
+
+// ---------------------------------------------------------------- hardening
+
+/** Max accepted request body size (chars of JSON ≈ bytes for ASCII-heavy). */
+const MAX_BODY_CHARS = 400_000;
+/** Per-IP token bucket: burst 12, refill 6 requests / minute. */
+const RATE_BURST = 12;
+const RATE_PER_MIN = 6;
+
+const buckets = new Map<string, { tokens: number; last: number }>();
+
+function clientIp(req: NextRequest): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  return (fwd ? fwd.split(",")[0] : "").trim() || req.headers.get("x-real-ip")?.trim() || "local";
+}
+
+function allowRequest(ip: string): boolean {
+  const now = Date.now();
+  const b = buckets.get(ip) ?? { tokens: RATE_BURST, last: now };
+  const elapsedMin = (now - b.last) / 60_000;
+  b.tokens = Math.min(RATE_BURST, b.tokens + elapsedMin * RATE_PER_MIN);
+  b.last = now;
+  if (b.tokens < 1) {
+    buckets.set(ip, b);
+    return false;
+  }
+  b.tokens -= 1;
+  buckets.set(ip, b);
+  // opportunistic cleanup so the map cannot grow unbounded
+  if (buckets.size > 5000) {
+    for (const [k, v] of buckets) {
+      if (now - v.last > 10 * 60_000) buckets.delete(k);
+    }
+  }
+  return true;
+}
+
+const wireMessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]),
+  content: z.string().max(60_000).nullish(),
+  tool_calls: z
+    .array(
+      z.object({
+        id: z.string().max(200).optional(),
+        type: z.string().max(40).optional(),
+        function: z
+          .object({
+            name: z.string().max(120).optional(),
+            arguments: z.union([z.string().max(60_000), z.record(z.string(), z.unknown())]).optional(),
+          })
+          .optional(),
+      })
+    )
+    .max(16)
+    .optional(),
+  tool_call_id: z.string().max(200).optional(),
+  name: z.string().max(120).optional(),
+});
+
+const chatBodySchema = z.object({
+  messages: z.array(wireMessageSchema).min(1).max(80),
+  tools: z.array(z.record(z.string(), z.unknown())).max(40).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+});
 
 interface WireToolCall {
   id?: string;
@@ -154,8 +219,8 @@ function convertMessages(body: ChatBody): Array<{ role: "assistant" | "user"; co
       out.push({ role: "user", content: content || "(empty)" });
     } else if (m.role === "assistant") {
       let text = content;
-      if (m.toolCalls?.length) {
-        const calls = m.toolCalls
+      if (m.tool_calls?.length) {
+        const calls = m.tool_calls
           .map((c) => `${c.function?.name ?? "?"}(${c.function?.arguments ?? "{}"})`)
           .join("; ");
         text = `${content}\n(system note: in that turn you called: ${calls}. The results follow as TOOL RESULT messages.)`.trim();
@@ -178,11 +243,37 @@ export async function POST(req: NextRequest) {
       { status: 501 }
     );
   }
+
+  // abuse controls: rate limit per client, then hard body-size cap
+  const ip = clientIp(req);
+  if (!allowRequest(ip)) {
+    return NextResponse.json(
+      { error: { message: "Rate limit reached — slow down and try again in a moment." } },
+      { status: 429, headers: { "Retry-After": "15" } }
+    );
+  }
+
+  const rawText = await req.text().catch(() => "");
+  if (rawText.length > MAX_BODY_CHARS) {
+    return NextResponse.json(
+      { error: { message: `Request too large (${rawText.length} chars > ${MAX_BODY_CHARS} cap).` } },
+      { status: 413 }
+    );
+  }
+
   let body: ChatBody;
   try {
-    body = (await req.json()) as ChatBody;
+    body = JSON.parse(rawText) as ChatBody;
   } catch {
     return NextResponse.json({ error: { message: "invalid JSON body" } }, { status: 400 });
+  }
+
+  const parsed = chatBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: { message: `Invalid request payload: ${parsed.error.issues[0]?.message ?? "schema mismatch"}` } },
+      { status: 400 }
+    );
   }
 
   if (!Array.isArray(body.messages) || body.messages.length === 0) {

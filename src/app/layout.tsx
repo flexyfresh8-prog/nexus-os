@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -11,6 +12,12 @@ const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
 });
+
+// CSP nonce for the inline theme bootstrap — provided by the security
+// middleware on the standalone runtime. The static (GitHub Pages) export
+// cannot read request headers; there the build-time gen-csp script covers
+// this same script with a content hash instead, so no nonce is needed.
+const IS_STATIC_EXPORT = process.env.DEPLOY_TARGET === "gh-pages";
 
 export const metadata: Metadata = {
   title: "NEXUS OS — Browser Desktop Environment",
@@ -31,15 +38,20 @@ export const viewport: Viewport = {
   themeColor: "#050507",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const nonce = IS_STATIC_EXPORT ? undefined : (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <head>
+        {/* honest default: never leak referrers to embedded/external sites */}
+        <meta name="referrer" content="no-referrer" />
         <script
+          nonce={nonce}
           // apply saved theme/accent before first paint (no flash)
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var s=JSON.parse(localStorage.getItem('nexus-settings')||'{}');var st=s&&s.state?s.state:{};var c=document.documentElement;if(st.theme==='light'){c.classList.remove('dark');}if(st.accent){c.style.setProperty('--nx-accent',st.accent);var m=st.accent.replace('#','');if(m.length===3){m=m.split('').map(function(x){return x+x;}).join('');}var n=parseInt(m,16);c.style.setProperty('--nx-accent-rgb',((n>>16)&255)+','+((n>>8)&255)+','+(n&255));}if(st.animations===false){c.classList.add('nx-no-anim');}}catch(e){}})();`,
